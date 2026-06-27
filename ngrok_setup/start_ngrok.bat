@@ -5,5 +5,8 @@ echo Starting ngrok tunnel for port 8003...
 echo.
 echo IMPORTANT: I-share ang URL na lalabas kay Jane at Classmate A!
 echo.
-C:\ngrok\ngrok.exe http 8003 --config=ngrok.yml
+echo Kung first time, i-run muna sa CMD:
+echo   ngrok config add-authtoken 3FhO78cop1waL5ArzNEmNqqnC9c_YzgKfYd4jeUo3y4m11c8
+echo.
+ngrok.exe http 8003
 pause
