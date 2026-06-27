@@ -1,20 +1,8 @@
--- =====================================================
--- OptiStock Inventory System — Full Database Schema
--- Database : optistock_db
--- Charset  : utf8mb4  |  Engine : InnoDB
--- API Base : http://localhost:8000/api/
--- =====================================================
-
 CREATE DATABASE IF NOT EXISTS optistock_db
   CHARACTER SET utf8mb4
   COLLATE utf8mb4_unicode_ci;
 
 USE optistock_db;
-
--- ─────────────────────────────────────────────────────────────────────────────
--- MODULE 1 — INVENTORY
--- Responsibility: Products, Categories, Suppliers, Stock Management, Users
--- ─────────────────────────────────────────────────────────────────────────────
 
 -- ── categories ───────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS categories (
