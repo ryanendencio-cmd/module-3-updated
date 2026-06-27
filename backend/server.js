@@ -14,7 +14,14 @@ const app = express();
 const PORT = 8003;
 
 app.use(cors({
-  origin: ['http://localhost:5175', 'http://localhost:5173', 'http://localhost:5174'],
+  origin: function (origin, cb) {
+    const allowed = [
+      /^https?:\/\/localhost(:\d+)?$/,
+      /^http:\/\/100\.\d+\.\d+\.\d+(:\d+)?$/,
+    ];
+    if (!origin || allowed.some(p => p.test(origin))) return cb(null, true);
+    return cb(null, true);
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
