@@ -2,9 +2,11 @@
 // If user is not logged in → show Login page
 // If user is logged in    → show Dashboard shell
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth }   from './context/AuthContext';
 import { useSessionTimeout } from './hooks/useSessionTimeout';
+import { wsManager } from './services/websocket';
+import { WebSocketProvider } from './context/WebSocketProvider';
 import Sidebar       from './components/Sidebar';
 import Topbar        from './components/Topbar';
 import Login         from './pages/Login';
@@ -31,10 +33,17 @@ const PAGES = {
 function AppShell({ active, setActive }) {
   const { logout } = useAuth();
   useSessionTimeout(logout);
+  const [wsConnected, setWsConnected] = useState(false);
   // Sidebar starts OPEN; hamburger toggles it — nav clicks do NOT close it
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
+  useEffect(() => {
+    wsManager.connect();
+    return () => wsManager.disconnect();
+  }, []);
+
   return (
+    <WebSocketProvider>
     <div className="app-shell">
       {/* LEFT: Sidebar — always in DOM, width collapses via CSS */}
       <Sidebar
@@ -49,16 +58,15 @@ function AppShell({ active, setActive }) {
         {PAGES[active]}
       </div>
     </div>
+    </WebSocketProvider>
   );
 }
 
 export default function App() {
-  const { user } = useAuth();
+  const { user, loading } = useAuth();
   const [active, setActive] = useState('dashboard');
 
-  // ── Not logged in → show login page ──────────────────────────────────────
+  if (loading) return null;
   if (!user) return <Login />;
-
-  // ── Logged in → show dashboard shell (with session timeout active) ────────
   return <AppShell active={active} setActive={setActive} />;
 }

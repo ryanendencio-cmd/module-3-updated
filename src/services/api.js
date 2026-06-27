@@ -1,162 +1,116 @@
-// =====================================================
-// src/services/api.js
-// Centralized REST API service for OptiStock Module 3
-// Base URL: http://localhost:8000/api/
-// =====================================================
+const BASE_URL = 'http://localhost:8003/api';
 
-const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
-
-// ── Token helper ──────────────────────────────────────────────────────────────
-function getToken() {
-  try {
-    const saved = localStorage.getItem('inventrack_user');
-    return saved ? JSON.parse(saved)?.token : null;
-  } catch {
-    return null;
-  }
+function getCookie(name) {
+  const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+  return match ? decodeURIComponent(match[2]) : null;
 }
 
-function authHeaders() {
-  const token = getToken();
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  return headers;
-}
-
-// ── Core fetch helper ─────────────────────────────────────────────────────────
 async function request(endpoint, options = {}) {
+  const headers = { ...options.headers };
+  if (options.body && !(options.body instanceof FormData)) {
+    headers['Content-Type'] = 'application/json';
+  }
+  const csrfToken = getCookie('csrftoken');
+  if (csrfToken && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(options.method || 'GET')) {
+    headers['X-CSRFToken'] = csrfToken;
+  }
   const res = await fetch(`${BASE_URL}${endpoint}`, {
+    headers,
+    credentials: 'include',
     ...options,
-    headers: { ...authHeaders(), ...(options.headers || {}) },
   });
-
   if (!res.ok) {
     let errMsg = `HTTP ${res.status}`;
     try {
       const errData = await res.json();
       errMsg = errData.detail || errData.message || errData.error || errMsg;
-    } catch {
-      // ignore JSON parse error
-    }
+    } catch {}
     throw new Error(errMsg);
   }
-
   return res.json();
 }
 
-// ── Helper: unwrap Django REST paginated results ──────────────────────────────
-// DRF returns { count, next, previous, results: [...] } OR just [...]
 export function unwrap(data) {
   return Array.isArray(data) ? data : (data?.results ?? []);
 }
 
-// =============================================================================
-// AUTH
-// =============================================================================
+// Auth (proxied via Dashboard backend → Django)
+export const loginUser = (email, password) =>
+  request('/login/', { method: 'POST', body: JSON.stringify({ email, password }) });
 
-/** POST /api/login/  →  { token, user: { id, name, role, email } } */
-export const loginUser = (username, password) =>
-  request('/login/', {
-    method: 'POST',
-    body: JSON.stringify({ username, password }),
-  });
+export const getMe = () => request('/me/');
 
-// =============================================================================
-// MODULE 1 — INVENTORY endpoints
-// =============================================================================
+export const logout = () => request('/logout/', { method: 'POST' });
 
-/** GET /api/products/  →  [ { id, sku, name, category_id, supplier_id,
- *                              cost_price, selling_price, stock,
- *                              reorder_level, status } ] */
+// Inventory proxy (via Dashboard backend → Django)
 export const getProducts = (queryString = '') =>
-  request(`/products/${queryString}`);
+  request(`/products${queryString}`);
 
-/** GET /api/products/archived/ */
-export const getArchivedProducts = () =>
-  request('/products/archived/');
-
-/** GET /api/products/dropdown/ */
-export const getProductsDropdown = () =>
-  request('/products/dropdown/');
-
-/** GET /api/categories/ */
 export const getCategories = () =>
-  request('/categories/');
+  request('/categories');
 
-/** GET /api/suppliers/ */
 export const getSuppliers = () =>
-  request('/suppliers/');
+  request('/suppliers');
 
-/** GET /api/users/ */
-export const getUsers = () =>
-  request('/users/');
-
-/** GET /api/stock-ledger/ */
-export const getStockLedger = () =>
-  request('/stock-ledger/');
-
-/** POST /api/stock-ledger/  →  record a stock movement */
-export const postStockLedger = (data) =>
-  request('/stock-ledger/', {
-    method: 'POST',
-    body: JSON.stringify(data),
-  });
-
-/** GET  /api/notifications/ */
-export const getNotifications = () =>
-  request('/notifications/');
-
-/** PUT /api/notifications/{id}/  →  mark as read */
-export const markNotificationRead = (id) =>
-  request(`/notifications/${id}/`, {
-    method: 'PUT',
-    body: JSON.stringify({ is_read: true }),
-  });
-
-// =============================================================================
-// MODULE 2 — POS endpoints (consumed by Module 3 for transaction data)
-// =============================================================================
-
-/** GET /api/sales-orders/  →  [ { receipt_no, cashier_id, total, paid,
- *                                  change_given, payment_method, status,
- *                                  items_count, created_at } ] */
+// POS proxy (via Dashboard backend → POS)
 export const getSalesOrders = () =>
-  request('/sales-orders/');
+  request('/dashboard/pos-transactions');
 
-/** GET /api/order-items/  →  [ { id, receipt_no, product_id, qty, price, subtotal } ] */
-export const getOrderItems = () =>
-  request('/order-items/');
-
-// =============================================================================
-// MODULE 3 — DASHBOARD endpoints (read-only views)
-// =============================================================================
-
-/** GET /api/dashboard/best-sellers/
- *  Returns v_best_sellers:
- *  [ { rank, id, name, category, quantity_sold, revenue } ] */
+// Dashboard aggregated endpoints
 export const getDashboardBestSellers = () =>
-  request('/dashboard/best-sellers/');
+  request('/dashboard/best-sellers');
 
-/** GET /api/dashboard/category-breakdown/
- *  Returns v_category_breakdown:
- *  [ { id, name, value, color } ] */
 export const getDashboardCategoryBreakdown = () =>
-  request('/dashboard/category-breakdown/');
+  request('/dashboard/category-breakdown');
 
-/** GET /api/dashboard/daily-sales-chart/
- *  Returns v_daily_sales_chart (last 12 days):
- *  [ { date, sales, txn } ] */
 export const getDashboardDailySalesChart = () =>
-  request('/dashboard/daily-sales-chart/');
+  request('/dashboard/daily-sales-chart');
 
-/** GET /api/dashboard/inventory-report/
- *  Returns v_inventory_report:
- *  [ { id, sku, name, category, stock, value, status } ] */
 export const getDashboardInventoryReport = () =>
-  request('/dashboard/inventory-report/');
+  request('/dashboard/inventory-report');
 
-/** GET /api/dashboard/low-stock-alerts/
- *  Returns v_low_stock_alerts:
- *  [ { id, sku, name, category, stock, reorder, status } ] */
 export const getDashboardLowStockAlerts = () =>
-  request('/dashboard/low-stock-alerts/');
+  request('/dashboard/low-stock-alerts');
+
+export const getDashboardSummary = () =>
+  request('/dashboard/summary');
+
+// POS data via Dashboard backend proxy
+export const getPosTransactions = (params = '') =>
+  request(`/dashboard/pos-transactions${params ? '?' + params : ''}`);
+
+export const getPosSalesByDate = (days = 7) =>
+  request(`/dashboard/pos-sales-by-date?days=${days}`);
+
+export const getPosUsers = () =>
+  request('/dashboard/pos-users');
+
+// CRUD for saved reports (Dashboard's own database)
+export const getSavedReports = () =>
+  request('/reports');
+
+export const createSavedReport = (data) =>
+  request('/reports', { method: 'POST', body: JSON.stringify(data) });
+
+export const updateSavedReport = (id, data) =>
+  request(`/reports/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+
+export const deleteSavedReport = (id) =>
+  request(`/reports/${id}`, { method: 'DELETE' });
+
+// CRUD for widgets
+export const getWidgets = () =>
+  request('/widgets');
+
+export const updateWidget = (id, data) =>
+  request(`/widgets/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+
+// Alerts
+export const getAlerts = () =>
+  request('/alerts');
+
+export const createAlert = (data) =>
+  request('/alerts', { method: 'POST', body: JSON.stringify(data) });
+
+export const markAlertRead = (id) =>
+  request(`/alerts/${id}/read`, { method: 'PUT' });

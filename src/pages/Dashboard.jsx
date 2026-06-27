@@ -306,7 +306,7 @@ export default function Dashboard() {
                     <div className={`product-rank ${rankClass(p.rank)}`}>{p.rank}</div>
                     <div className="product-info">
                       <p>{p.name}</p>
-                      <span>{p.category} · {Number(p.quantity_sold).toLocaleString()} sold</span>
+                      <span>{p.category} · {Number(p.sold).toLocaleString()} sold</span>
                     </div>
                     <div className="product-amount">₱{Number(p.revenue).toLocaleString()}</div>
                   </div>

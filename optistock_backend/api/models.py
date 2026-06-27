@@ -209,12 +209,12 @@ class OrderItem(models.Model):
 # ── MODULE 3 — DASHBOARD VIEWS (read-only) ────────────────────────────────────
 
 class VBestSeller(models.Model):
-    rank          = models.IntegerField()
-    id            = models.CharField(max_length=20, primary_key=True)
-    name          = models.CharField(max_length=200)
-    category      = models.CharField(max_length=100)
-    quantity_sold = models.IntegerField()
-    revenue       = models.DecimalField(max_digits=14, decimal_places=2)
+    rank  = models.IntegerField()
+    id    = models.CharField(max_length=20, primary_key=True)
+    name  = models.CharField(max_length=200)
+    category = models.CharField(max_length=100)
+    sold  = models.IntegerField()
+    revenue = models.DecimalField(max_digits=14, decimal_places=2)
 
     class Meta:
         managed = False
@@ -233,8 +233,7 @@ class VCategoryBreakdown(models.Model):
 
 
 class VDailySalesChart(models.Model):
-    id    = models.AutoField(primary_key=True)   # dummy PK for ORM
-    date  = models.CharField(max_length=10)
+    date  = models.CharField(max_length=10, primary_key=True)
     sales = models.DecimalField(max_digits=14, decimal_places=2)
     txn   = models.IntegerField()
 

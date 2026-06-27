@@ -18,7 +18,7 @@ const IconLock = () => (
 
 export default function Login() {
   const { login } = useAuth();
-  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPass, setShowPass] = useState(false);
   const [remember, setRemember] = useState(false);
@@ -30,7 +30,7 @@ export default function Login() {
     e.preventDefault();
     setError('');
     setLoading(true);
-    const result = await login(username, password);
+    const result = await login(email, password);
     if (!result.ok) {
       setError(result.error);
       setLoading(false);
@@ -73,16 +73,16 @@ export default function Login() {
 
             <form onSubmit={handleSubmit} autoComplete="off" style={{ marginTop: 28 }}>
 
-              {/* User Name Input */}
+              {/* Email Input */}
               <div className="login-field">
                 <div className="login-input-wrap">
                   <span className="login-input-icon"><IconUser /></span>
                   <input
-                    id="login-username"
-                    type="text"
-                    placeholder="User name"
-                    value={username}
-                    onChange={e => setUsername(e.target.value)}
+                    id="login-email"
+                    type="email"
+                    placeholder="Email address"
+                    value={email}
+                    onChange={e => setEmail(e.target.value)}
                     required
                     autoFocus
                   />
@@ -129,8 +129,8 @@ export default function Login() {
                       cancelText: 'Cancel'
                     });
                     if (confirm) {
-                      setUsername('admin');
-                      setPassword('admin123');
+                      setEmail('admin@optistock.com');
+                      setPassword('optistock2026');
                       showSuccessToast('Demo credentials autofilled');
                     }
                   }}

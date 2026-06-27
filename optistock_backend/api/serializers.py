@@ -16,12 +16,14 @@ class CategorySerializer(serializers.ModelSerializer):
     class Meta:
         model  = Category
         fields = '__all__'
+        read_only_fields = ['id']
 
 
 class SupplierSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Supplier
         fields = '__all__'
+        read_only_fields = ['id']
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -39,12 +41,13 @@ class ProductSerializer(serializers.ModelSerializer):
         model  = Product
         fields = [
             'id', 'sku', 'name',
-            'category_id', 'category_name',
-            'supplier_id', 'supplier_name',
+            'category', 'category_name',
+            'supplier', 'supplier_name',
             'cost_price', 'selling_price',
             'stock', 'reorder_level', 'status',
             'created_at', 'updated_at',
         ]
+        read_only_fields = ['id']
 
 
 class ProductDropdownSerializer(serializers.ModelSerializer):
@@ -54,9 +57,16 @@ class ProductDropdownSerializer(serializers.ModelSerializer):
 
 
 class StockLedgerSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+
     class Meta:
         model  = StockLedger
-        fields = '__all__'
+        fields = [
+            'id', 'tx_id', 'product', 'product_name', 'type',
+            'qty', 'balance_after', 'user', 'reference_type',
+            'reference_id', 'notes', 'created_at',
+        ]
+        read_only_fields = ['id', 'tx_id', 'balance_after', 'created_at']
 
 
 class NotificationSerializer(serializers.ModelSerializer):

@@ -1,7 +1,9 @@
 // Sidebar.jsx – Navigation sidebar with SVG icons (no emojis)
 
 import { useAuth } from '../context/AuthContext';
+import { logout as apiLogout } from '../services/api';
 import { confirmAction, showSuccessToast } from '../utils/swalHelper';
+import { MODULE_URLS } from '../config';
 
 // ── SVG icon map ──────────────────────────────────────────────────────────────
 const NavIcons = {
@@ -55,6 +57,59 @@ const IconLogout = () => (
     <line x1="21" y1="12" x2="9" y2="12"/>
   </svg>
 );
+
+const ExternalLinkIcon = () => (
+  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+  </svg>
+);
+
+const IconBox = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+  </svg>
+);
+
+const IconCart = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/>
+    <path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/>
+  </svg>
+);
+
+function ModuleLink({ href, icon: Icon, label }) {
+  if (href) {
+    return (
+      <a href={href} target="_blank" rel="noopener noreferrer"
+        style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          padding: '9px 12px', borderRadius: 'var(--radius-sm)',
+          color: 'var(--text-secondary)', fontSize: '0.82rem', fontWeight: 500,
+          textDecoration: 'none', cursor: 'pointer',
+          transition: 'background 0.18s, color 0.18s',
+          marginBottom: 2,
+        }}
+        onMouseOver={e => { e.currentTarget.style.background = 'var(--bg-hover)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+        onMouseOut={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
+      >
+        <Icon />
+        <span style={{ flex: 1 }}>{label}</span>
+        <ExternalLinkIcon />
+      </a>
+    );
+  }
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      padding: '9px 12px', borderRadius: 'var(--radius-sm)',
+      color: 'var(--text-muted)', fontSize: '0.82rem', fontWeight: 500,
+      opacity: 0.5, cursor: 'not-allowed', marginBottom: 2,
+    }}>
+      <Icon />
+      <span style={{ flex: 1 }}>{label}</span>
+    </div>
+  );
+}
 
 export default function Sidebar({ active, setActive, isOpen }) {
   const { user, logout } = useAuth();
@@ -126,6 +181,19 @@ export default function Sidebar({ active, setActive, isOpen }) {
         ))}
       </nav>
 
+      {/* Integrated Modules */}
+      <div style={{ padding: '0 12px', marginTop: 4 }}>
+        <div style={{
+          fontSize: '0.65rem', fontWeight: 600, color: 'var(--text-muted)',
+          letterSpacing: '0.1em', textTransform: 'uppercase',
+          padding: '8px 8px 4px', borderTop: '1px solid var(--border)', marginBottom: 4,
+        }}>
+          Integrated
+        </div>
+        <ModuleLink href={MODULE_URLS.INVENTORY} icon={IconBox} label="Inventory Hub" />
+        <ModuleLink href={MODULE_URLS.POS} icon={IconCart} label="POS Terminal" />
+      </div>
+
       {/* User pill + logout */}
       <div className="sidebar-footer">
         <div className="user-pill">
@@ -148,6 +216,7 @@ export default function Sidebar({ active, setActive, isOpen }) {
               cancelText: 'Cancel'
             });
             if (confirmed) {
+              await apiLogout();
               logout();
               showSuccessToast('Successfully signed out');
             }

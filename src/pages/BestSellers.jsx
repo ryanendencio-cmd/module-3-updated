@@ -38,7 +38,7 @@ export default function BestSellers() {
           const list = unwrap(data).map(p => ({
             ...p,
             rank:          Number(p.rank),
-            quantity_sold: Number(p.quantity_sold),
+            sold: Number(p.sold),
             revenue:       Number(p.revenue),
           }));
           setSellers(list);
@@ -56,7 +56,7 @@ export default function BestSellers() {
 
   const maxRevenue   = sellers.length ? Math.max(...sellers.map(p => p.revenue)) : 1;
   const topProduct   = sellers[0];
-  const totalUnitsSold = sellers.reduce((s, p) => s + p.quantity_sold, 0);
+  const totalUnitsSold = sellers.reduce((s, p) => s + p.sold, 0);
 
   if (error) {
     return (
@@ -189,7 +189,7 @@ export default function BestSellers() {
                       </td>
                       <td style={{ fontWeight: 600 }}>{p.name}</td>
                       <td><span className="badge badge-blue">{p.category}</span></td>
-                      <td style={{ fontWeight: 700 }}>{p.quantity_sold.toLocaleString()}</td>
+                      <td style={{ fontWeight: 700 }}>{p.sold.toLocaleString()}</td>
                       <td style={{ fontWeight: 700, color: 'var(--accent-green)' }}>
                         ₱{p.revenue.toLocaleString()}
                       </td>

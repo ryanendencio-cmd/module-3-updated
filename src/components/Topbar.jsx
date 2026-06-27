@@ -1,11 +1,9 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   confirmAction,
   showSuccessToast,
   showLoading,
   closeLoading,
-  showHtmlAlert,
-  confirmHtmlAction
 } from '../utils/swalHelper';
 import { getDashboardLowStockAlerts, unwrap } from '../services/api';
 
@@ -35,75 +33,37 @@ const IconDownload = () => (
 );
 
 export default function Topbar({ active, onToggleSidebar }) {
-  const [hasNotif, setHasNotif] = useState(true);
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [alerts, setAlerts] = useState([]);
+  const notifRef = useRef(null);
+
   const info = pageInfo[active] || pageInfo.dashboard;
   const now = new Date().toLocaleDateString('en-PH', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
   });
 
-  const handleNotificationsClick = async () => {
-    if (!hasNotif) {
-      showHtmlAlert({
-        title: 'Notifications',
-        html: '<div style="padding: 10px 0; color: var(--text-secondary);">No new notifications. All alerts cleared.</div>',
-        icon: 'info',
-      });
-      return;
-    }
+  const critical = alerts.filter(p => p.status === 'critical');
+  const low = alerts.filter(p => p.status === 'low');
 
-    let alerts = [];
-    try {
-      const data = await getDashboardLowStockAlerts();
-      alerts = unwrap(data);
-    } catch {
-      // silently fail
-    }
+  useEffect(() => {
+    if (!notifOpen) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await getDashboardLowStockAlerts();
+        if (!cancelled) setAlerts(unwrap(data));
+      } catch { /* silently fail */ }
+    })();
+    return () => { cancelled = true; };
+  }, [notifOpen]);
 
-    const criticalItems = alerts.filter(p => p.status === 'critical');
-    const lowItems      = alerts.filter(p => p.status === 'low');
-
-    const htmlContent = `
-      <div style="text-align:left;max-height:250px;overflow-y:auto;padding:4px;font-family:'Poppins',sans-serif;">
-        <p style="font-size:0.82rem;margin-bottom:12px;color:var(--text-secondary);font-weight:500;">
-          You have <strong>${alerts.length}</strong> items requiring attention:
-        </p>
-        ${criticalItems.map(p => `
-          <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:8px;padding:8px 10px;
-            background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.15);border-radius:6px;font-size:0.8rem;font-weight:600;">
-            <span style="width:8px;height:8px;border-radius:50%;background:var(--accent-red);display:inline-block;margin-top:4px;flex-shrink:0;"></span>
-            <div>
-              <div style="color:var(--text-primary);font-weight:700;">[CRITICAL] ${p.name}</div>
-              <div style="font-size:0.72rem;color:var(--text-secondary);margin-top:2px;">Stock: ${p.stock} / Reorder at: ${p.reorder}</div>
-            </div>
-          </div>
-        `).join('')}
-        ${lowItems.map(p => `
-          <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:8px;padding:8px 10px;
-            background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.15);border-radius:6px;font-size:0.8rem;font-weight:600;">
-            <span style="width:8px;height:8px;border-radius:50%;background:var(--accent-amber);display:inline-block;margin-top:4px;flex-shrink:0;"></span>
-            <div>
-              <div style="color:var(--text-primary);font-weight:700;">[LOW STOCK] ${p.name}</div>
-              <div style="font-size:0.72rem;color:var(--text-secondary);margin-top:2px;">Stock: ${p.stock} / Reorder at: ${p.reorder}</div>
-            </div>
-          </div>
-        `).join('')}
-        ${alerts.length === 0 ? '<div style="color:var(--text-muted);font-size:0.82rem;">No stock alerts at this time.</div>' : ''}
-      </div>
-    `;
-
-    const confirmDismiss = await confirmHtmlAction({
-      title: 'Active Alerts',
-      html: htmlContent,
-      icon: 'warning',
-      confirmText: 'Dismiss All',
-      cancelText: 'Close',
-    });
-
-    if (confirmDismiss) {
-      setHasNotif(false);
-      showSuccessToast('All alerts successfully dismissed');
-    }
-  };
+  useEffect(() => {
+    const handleClick = (e) => {
+      if (notifRef.current && !notifRef.current.contains(e.target)) setNotifOpen(false);
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, []);
 
   const handleExportClick = async () => {
     const confirm = await confirmAction({
@@ -146,10 +106,78 @@ export default function Topbar({ active, onToggleSidebar }) {
           Live
         </div>
 
-        {/* Notifications */}
-        <div className="icon-btn" title="Notifications" onClick={handleNotificationsClick}>
-          <IconBell />
-          {hasNotif && <span className="notif-dot" />}
+        {/* Notifications Dropdown */}
+        <div ref={notifRef} style={{ position: 'relative', display: 'flex', alignItems: 'center' }} title="Notifications">
+          <div
+            onClick={() => setNotifOpen(o => !o)}
+            className="icon-btn"
+          >
+            <IconBell />
+            {critical.length + low.length > 0 && <span className="notif-dot" />}
+          </div>
+
+          <div style={{
+            position: 'absolute', top: 'calc(100% + 8px)', right: 0,
+            width: 340, background: '#fff', borderRadius: 12,
+            border: '1px solid var(--border)', boxShadow: '0 8px 32px rgba(0,0,0,0.12)',
+            zIndex: 100, overflow: 'hidden', display: 'flex', flexDirection: 'column',
+            opacity: notifOpen ? 1 : 0, visibility: notifOpen ? 'visible' : 'hidden',
+            transform: notifOpen ? 'scale(1)' : 'scale(0.95)',
+            transformOrigin: 'top right',
+            transition: 'opacity 0.2s, transform 0.2s, visibility 0.2s',
+          }}>
+            <div style={{
+              padding: '12px 16px', borderBottom: '1px solid var(--border)',
+              background: 'var(--bg-secondary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            }}>
+              <span style={{ fontWeight: 700, fontSize: '0.85rem', color: 'var(--text-primary)' }}>Stock Alerts</span>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                {critical.length + low.length} items
+              </span>
+            </div>
+
+            <div style={{ maxHeight: 300, overflowY: 'auto', padding: 8 }}>
+              {critical.length === 0 && low.length === 0 && (
+                <div style={{ padding: '24px 16px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.82rem' }}>
+                  No stock alerts at this time.
+                </div>
+              )}
+
+              {critical.map(p => (
+                <div key={p.id} style={{
+                  display: 'flex', alignItems: 'flex-start', gap: 10,
+                  padding: '10px 12px', marginBottom: 4,
+                  background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)',
+                  borderRadius: 8, fontSize: '0.8rem',
+                }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#ef4444', display: 'inline-block', marginTop: 4, flexShrink: 0 }} />
+                  <div>
+                    <div style={{ fontWeight: 700, color: 'var(--text-primary)' }}>[CRITICAL] {p.name}</div>
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: 2 }}>
+                      Stock: {p.stock} / Reorder at: {p.reorder}
+                    </div>
+                  </div>
+                </div>
+              ))}
+
+              {low.map(p => (
+                <div key={p.id} style={{
+                  display: 'flex', alignItems: 'flex-start', gap: 10,
+                  padding: '10px 12px', marginBottom: 4,
+                  background: 'rgba(245,158,11,0.06)', border: '1px solid rgba(245,158,11,0.15)',
+                  borderRadius: 8, fontSize: '0.8rem',
+                }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#f59e0b', display: 'inline-block', marginTop: 4, flexShrink: 0 }} />
+                  <div>
+                    <div style={{ fontWeight: 700, color: 'var(--text-primary)' }}>[LOW STOCK] {p.name}</div>
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: 2 }}>
+                      Stock: {p.stock} / Reorder at: {p.reorder}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
 
         {/* Export */}
