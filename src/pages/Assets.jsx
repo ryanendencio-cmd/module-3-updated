@@ -1,0 +1,1374 @@
+import React, { useState, useEffect, useMemo } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
+import AdminLayout from '../components/AdminLayout'
+import { api } from '../api'
+import Pagination from '../components/Pagination'
+import { usePagination } from '../components/usePagination'
+
+export default function Assets() {
+    const { id } = useParams();
+    const navigate = useNavigate();
+    const now = new Date();
+    const todayDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+    const [modalState, setModalState] = useState('NONE');
+    const [selectedEquipment, setSelectedEquipment] = useState(null);
+    const [successMsg, setSuccessMsg] = useState('');
+
+    const [dropdownProjects, setDropdownProjects] = useState([]);
+
+    useEffect(() => {
+        api.get('/projects').then(data => {
+            setDropdownProjects(data);
+            if (!id && data.length > 0) {
+                navigate(`/assets/${data[0].id}`, { replace: true });
+            }
+        }).catch(console.error);
+    }, [id, navigate]);
+
+    const [workers, setWorkers] = useState([]);
+    useEffect(() => {
+        api.get('/workers').then(data => setWorkers(data.filter(w => w.status === 'Active' && (w.approval_status || 'Approved') !== 'Pending'))).catch(console.error);
+    }, []);
+
+    const currentProjectId = id || (dropdownProjects[0]?.id ?? '1');
+    const currentProject = useMemo(() => {
+        return dropdownProjects.find(p => String(p.id) === String(currentProjectId)) || dropdownProjects[0] || { name: 'Construction Project' };
+    }, [dropdownProjects, currentProjectId]);
+    const [equipment, setEquipment] = useState([]);
+
+
+    const [borrowHistory, setBorrowHistory] = useState([]);
+
+    const matchesCurrentProject = (record) => {
+        const rawProjectId = record?.project_id ?? record?.projectId ?? null;
+        const rawProjectName = record?.project_name ?? record?.projectName ?? record?.project ?? '';
+
+        const projectMatch = rawProjectId !== null && rawProjectId !== undefined && rawProjectId !== '' && String(rawProjectId).trim() !== 'null' && String(rawProjectId).trim() !== 'undefined'
+            ? String(rawProjectId) === String(currentProjectId)
+            : false;
+
+        const projectNameMatch = currentProject?.name && rawProjectName
+            ? String(rawProjectName).trim().toLowerCase() === String(currentProject.name).trim().toLowerCase()
+            : false;
+
+        const unscopedRecord = rawProjectId === null || rawProjectId === undefined || String(rawProjectId).trim() === '' || String(rawProjectId).trim() === 'null' || String(rawProjectId).trim() === 'undefined';
+
+        return projectMatch || projectNameMatch || unscopedRecord;
+    };
+
+    const refreshAssets = async () => {
+        if (!currentProjectId) return;
+
+        try {
+            const [projectAssets, projectHistory] = await Promise.all([
+                api.get(`/assets/${currentProjectId}`).catch(() => []),
+                api.get(`/borrow-history/${currentProjectId}`).catch(() => [])
+            ]);
+
+            const normalizeAsset = (item) => ({ ...item, condition: item.condition || item.type || 'Good' });
+            let nextEquipment = Array.isArray(projectAssets) ? projectAssets.map(normalizeAsset) : [];
+            let nextHistory = Array.isArray(projectHistory) ? projectHistory : [];
+
+            if (!nextEquipment.length) {
+                const allAssets = await api.get('/assets').catch(() => []);
+                nextEquipment = Array.isArray(allAssets)
+                    ? allAssets
+                        .filter(item => matchesCurrentProject(item))
+                        .map(normalizeAsset)
+                    : [];
+            }
+
+            if (!nextHistory.length) {
+                const allHistory = await api.get('/borrow-history/ALL').catch(() => []);
+                nextHistory = Array.isArray(allHistory)
+                    ? allHistory.filter(record => matchesCurrentProject(record))
+                    : [];
+            }
+
+            setEquipment(nextEquipment);
+            setBorrowHistory(nextHistory);
+        } catch (error) {
+            console.error('Failed to refresh asset data:', error);
+            setEquipment([]);
+            setBorrowHistory([]);
+        }
+    };
+
+    // Live auto-refresh: syncs inventory, unreturned tools, and history automatically whenever changes occur
+    useEffect(() => {
+        refreshAssets();
+        const pollTimer = setInterval(refreshAssets, 3500);
+        return () => clearInterval(pollTimer);
+    }, [currentProjectId]);
+
+    const recordHistory = async (record) => {
+        const payload = {
+            project_id: currentProjectId,
+            tool_name: record.tool_name,
+            borrower_name: record.borrower_name || 'Site Worker',
+            quantity: record.quantity || 1,
+            action: record.action,
+            condition_status: record.condition_status || 'Good',
+            date_time: record.date_time || new Date().toISOString()
+        };
+        try {
+            const res = await api.post('/borrow-history', payload);
+            setBorrowHistory(prev => [res.id ? res : payload, ...prev]);
+        } catch {
+            setBorrowHistory(prev => [payload, ...prev]);
+        }
+    };
+
+    // ── FILTER STATES ──
+    const [searchItem, setSearchItem] = useState('');
+    const [filterItemSelect, setFilterItemSelect] = useState('All');
+    const [filterBorrower, setFilterBorrower] = useState('All');
+    const [filterStatus, setFilterStatus] = useState('All');
+    const [filterDatePreset, setFilterDatePreset] = useState('All'); // 'All', 'Today', 'This Week', 'This Month', 'Custom'
+    const [filterDateFrom, setFilterDateFrom] = useState('');
+    const [filterDateTo, setFilterDateTo] = useState('');
+
+    const [formData, setFormData] = useState({
+        name: '', status: 'Available', condition: 'Good', user: '', quantity: 1, borrowQty: 1,
+        expectedReturnDate: '', expectedReturnTime: ''
+    });
+
+    const handleInputChange = (e) => {
+        let val = e.target.value;
+        if (e.target.name === 'name' && val.length > 0) {
+            val = val.charAt(0).toUpperCase() + val.slice(1);
+        }
+        setFormData({ ...formData, [e.target.name]: val });
+    };
+    const handleProjectChange = (e) => navigate(`/assets/${e.target.value}`);
+
+    const handleActionClick = (item) => {
+        if (item.status === 'Available') return;
+        setSelectedEquipment(item);
+        setFormData({ name: item.name, status: item.status, condition: item.condition, user: item.borrower || item.assigned_to || item.user || '', quantity: item.qty || 1, borrowQty: 1 });
+
+        if (item.status === 'In Use') setModalState('CHECK_IN');
+        else if (item.status === 'Maintenance') setModalState('REPAIR');
+    };
+
+    const handleBorrowClick = (item) => {
+        setSelectedEquipment(item);
+        setFormData({
+            name: item.name,
+            status: 'In Use',
+            condition: item.condition || 'Good',
+            user: workers[0]?.name || '',
+            quantity: item.qty || 1,
+            borrowQty: 1,
+            expectedReturnDate: '',
+            expectedReturnTime: ''
+        });
+        setModalState('BORROW');
+    };
+
+    const handleOpenBorrowModal = () => {
+        const availableItems = groupedEquipment.filter(g => g.status === 'Available');
+        if (availableItems.length === 0) {
+            alert('No available tools in inventory to borrow.');
+            return;
+        }
+        const item = availableItems[0];
+        setSelectedEquipment(item);
+        setFormData({
+            name: item.name,
+            status: 'In Use',
+            condition: item.condition || 'Good',
+            user: workers[0]?.name || '',
+            quantity: item.qty || 1,
+            borrowQty: 1,
+            expectedReturnDate: '',
+            expectedReturnTime: ''
+        });
+        setModalState('BORROW');
+    };
+
+    const handleEditClick = (item) => {
+        setSelectedEquipment(item);
+        setFormData({ name: item.name, status: item.status, condition: item.condition, user: item.user || '', quantity: 1, borrowQty: 1 });
+        setModalState('EDIT');
+    };
+
+    const submitBorrow = async (e) => {
+        e.preventDefault();
+        const borrowerName = (formData.user || '').trim();
+        if (!borrowerName) {
+            alert('Please select or enter the borrower name.');
+            return;
+        }
+        if (!formData.expectedReturnDate) {
+            alert('Please choose an expected return date.');
+            return;
+        }
+        if (formData.expectedReturnTime) {
+            const dueAt = new Date(`${formData.expectedReturnDate}T${formData.expectedReturnTime}`);
+            if (Number.isNaN(dueAt.getTime()) || dueAt <= new Date()) {
+                alert('Expected return time must be in the future.');
+                return;
+            }
+        }
+        const maxQty = selectedEquipment.qty || (selectedEquipment.ids || []).length || 1;
+        const qty = Math.min(Math.max(parseInt(formData.borrowQty, 10) || 1, 1), maxQty);
+        const idsToProcess = (selectedEquipment.ids || [selectedEquipment.id]).slice(0, qty);
+        const nowIso = new Date().toISOString();
+
+        try {
+            await Promise.all(idsToProcess.map(id => {
+                const item = equipment.find(eq => eq.id === id);
+                return api.put(`/assets/${id}`, {
+                    ...item,
+                    project_id: item?.project_id || currentProjectId,
+                    status: 'In Use',
+                    assigned_to: borrowerName,
+                    user: borrowerName,
+                    borrow_at: nowIso,
+                    expected_return_date: formData.expectedReturnDate,
+                    expected_return_time: formData.expectedReturnTime || null,
+                    condition: formData.condition || item?.condition || 'Good'
+                });
+            }));
+
+            await recordHistory({
+                tool_name: selectedEquipment.name,
+                borrower_name: borrowerName,
+                quantity: qty,
+                action: 'Borrowed',
+                condition_status: formData.condition || 'Good',
+                date_time: nowIso
+            });
+
+            setEquipment(prev => prev.map(eq => idsToProcess.includes(eq.id)
+                ? { ...eq, status: 'In Use', assigned_to: borrowerName, user: borrowerName, borrow_at: nowIso, expected_return_date: formData.expectedReturnDate, expected_return_time: formData.expectedReturnTime || null, condition: formData.condition || eq.condition }
+                : eq
+            ));
+
+            setSuccessMsg(`${qty} ${selectedEquipment.name}(s) borrowed by ${borrowerName}.`);
+            setModalState('SUCCESS');
+        } catch (error) {
+            console.error('Error borrowing tool:', error);
+            alert('Failed to borrow tool: ' + (error.message || 'Server error'));
+        }
+    };
+
+    const submitEdit = async (e) => {
+        e.preventDefault();
+        try {
+            // Apply edit to ALL ids in the group
+            const idsToUpdate = selectedEquipment.ids || [selectedEquipment.id];
+            await Promise.all(idsToUpdate.map(id => {
+                const original = equipment.find(eq => eq.id === id);
+                return api.put(`/assets/${id}`, {
+                    ...original,
+                    project_id: original?.project_id || currentProjectId,
+                    name: formData.name,
+                    condition: formData.condition,
+                    status: formData.status,
+                });
+            }));
+            setEquipment(prev => prev.map(eq =>
+                idsToUpdate.includes(eq.id)
+                    ? { ...eq, name: formData.name, condition: formData.condition, status: formData.status }
+                    : eq
+            ));
+            setSuccessMsg('Tool details updated successfully.');
+            setModalState('SUCCESS');
+        } catch (error) {
+            console.error(error);
+        }
+    };
+
+    const submitCheckIn = async (e) => {
+        e.preventDefault();
+        const newStatus = formData.condition === 'Broken' || formData.condition === 'Needs Repair' ? 'Maintenance' : 'Available';
+        const qty = Math.min(parseInt(formData.borrowQty, 10) || 1, (selectedEquipment.ids || [selectedEquipment.id]).length);
+        const idsToProcess = (selectedEquipment.ids || [selectedEquipment.id]).slice(0, qty);
+        try {
+            await Promise.all(idsToProcess.map(id => {
+                const item = equipment.find(eq => eq.id === id);
+                return api.put(`/assets/${id}`, {
+                    ...item,
+                    project_id: item?.project_id || currentProjectId,
+                    status: newStatus,
+                    assigned_to: null,
+                    user: '—',
+                    borrow_at: null,
+                    expected_return_date: null,
+                    expected_return_time: null,
+                    condition: formData.condition,
+                    type: formData.condition
+                });
+            }));
+
+            const borrowerName = selectedEquipment.borrower || selectedEquipment.assigned_to || selectedEquipment.user || 'Site Worker';
+            recordHistory({
+                tool_name: selectedEquipment.name,
+                borrower_name: borrowerName,
+                quantity: qty,
+                action: 'Returned',
+                condition_status: formData.condition || 'Good',
+                date_time: new Date().toISOString()
+            });
+
+            setEquipment(prev => prev.map(eq => idsToProcess.includes(eq.id)
+                ? { ...eq, status: newStatus, assigned_to: null, user: '—', borrow_at: null, expected_return_date: null, expected_return_time: null, condition: formData.condition }
+                : eq
+            ));
+            setSuccessMsg(`${qty} ${selectedEquipment.name}(s) returned and recorded.`);
+            setModalState('SUCCESS');
+        } catch (error) {
+            console.error(error);
+            alert('Failed to return tool: ' + (error.message || 'Server error'));
+        }
+    };
+
+    const submitRepair = (e) => {
+        e.preventDefault();
+        api.put(`/assets/${selectedEquipment.id}`, {
+            ...selectedEquipment,
+            project_id: selectedEquipment.project_id || currentProjectId,
+            status: 'Available',
+            type: 'Good'
+        })
+            .then(() => {
+                setEquipment(prev => prev.map(eq => eq.id === selectedEquipment.id ? { ...eq, status: 'Available', condition: 'Good' } : eq));
+                setSuccessMsg(`${selectedEquipment.name} marked as repaired and available.`);
+                setModalState('SUCCESS');
+            }).catch(console.error);
+    };
+
+    const handleDeleteAsset = (id) => {
+        if (!window.confirm('Delete this equipment?')) return;
+        api.delete(`/assets/${id}`).then(() => {
+            setEquipment(prev => prev.filter(eq => eq.id !== id));
+        }).catch(console.error);
+    };
+
+    const handleRFIDScan = () => {
+        setModalState('SCANNING');
+        setTimeout(() => {
+            const targetItem = equipment.find(e => e.status === 'In Use');
+            if (targetItem) {
+                const updated = equipment.map(eq => eq.id === targetItem.id ? {
+                    ...eq,
+                    status: 'Available',
+                    user: '—',
+                    assigned_to: null,
+                    borrow_at: null
+                } : eq);
+
+                recordHistory({
+                    tool_name: targetItem.name,
+                    borrower_name: targetItem.assigned_to || targetItem.user || 'RFID User',
+                    quantity: 1,
+                    action: 'Returned',
+                    condition_status: targetItem.condition || 'Good',
+                    date_time: new Date().toISOString()
+                });
+
+                setEquipment(updated);
+                setSuccessMsg(`RFID read. ${targetItem.name} returned.`);
+                setModalState('SUCCESS');
+            } else {
+                setModalState('NONE');
+            }
+        }, 2500);
+    };
+
+    const handleConfirmAdd = async (e) => {
+        e.preventDefault();
+        const qty = parseInt(formData.quantity, 10) || 1;
+        const targetProjId = currentProjectId || dropdownProjects[0]?.id || null;
+
+
+
+        const payload = {
+            project_id: targetProjId,
+            name: formData.name.trim(),
+            status: 'Available',
+            assigned_to: null,
+            user: '—',
+            condition: formData.condition || 'Good'
+        };
+        try {
+            const promises = Array.from({ length: qty }).map(() => api.post('/assets', payload));
+            const newEquipments = await Promise.all(promises);
+            setEquipment(prev => [...prev, ...newEquipments]);
+            setSuccessMsg(`${qty} tool(s) added to inventory.`);
+            setModalState('SUCCESS');
+        } catch (error) {
+            console.error('Error adding tool to inventory:', error);
+            alert('Failed to add tool: ' + (error.message || 'Server error'));
+        }
+    };
+
+    const resetAndClose = () => {
+        setModalState('NONE');
+        setFormData({ name: '', status: 'Available', condition: 'Good', user: '', quantity: 1, borrowQty: 1 });
+        setSelectedEquipment(null);
+    };
+
+    const availableCount = equipment.filter(e => e.status === 'Available').length;
+    const returnedCount = equipment.filter(e => e.status === 'Returned').length;
+    const inUseCount = equipment.filter(e => e.status === 'In Use').length;
+    const maintenanceCount = equipment.filter(e => e.status === 'Maintenance').length;
+    const unreturnedTools = equipment.filter(e => e.status === 'In Use');
+
+    const card1Count = returnedCount > 0 && availableCount === 0 ? returnedCount : availableCount;
+    const card1Label = returnedCount > 0 && availableCount === 0 ? 'RETURNED' : 'AVAILABLE';
+
+    // Keep distinct return deadlines separate when grouping borrowed tools.
+    const groupedEquipment = useMemo(() => {
+        return Object.values(
+            equipment.reduce((acc, item) => {
+                const cond = item.condition || item.type || 'Good';
+                const borrower = item.status === 'In Use' ? (item.assigned_to || item.user || 'Site Worker') : '—';
+                const key = `${item.name}||${item.status}||${cond}||${borrower}||${item.expected_return_date || ''}||${item.expected_return_time || ''}`;
+                if (!acc[key]) {
+                    acc[key] = { ...item, borrower, condition: cond, qty: 1, ids: [item.id] };
+                } else {
+                    acc[key].qty += 1;
+                    acc[key].ids.push(item.id);
+                }
+                return acc;
+            }, {})
+        );
+    }, [equipment]);
+
+    // Active borrowers (currently have unreturned tools)
+    const activeBorrowerNames = useMemo(() => {
+        const s = new Set();
+        equipment.filter(e => e.status === 'In Use').forEach(e => {
+            const b = e.assigned_to || e.user;
+            if (b && b !== '—' && b !== 'None') s.add(b.trim());
+        });
+        return s;
+    }, [equipment]);
+
+    // Unique list of all borrowers (active in use, borrow history, and registered workers)
+    const borrowerList = useMemo(() => {
+        const names = new Set();
+        equipment.forEach(e => {
+            const b = e.assigned_to || e.user;
+            if (b && b !== '—' && b !== 'None') names.add(b.trim());
+        });
+        borrowHistory.forEach(h => {
+            const b = h.borrower_name || h.assigned_to;
+            if (b && b !== '—' && b !== 'None') names.add(b.trim());
+        });
+        workers.forEach(w => {
+            if (w.name) names.add(w.name.trim());
+        });
+        return Array.from(names).sort((a, b) => a.localeCompare(b));
+    }, [equipment, borrowHistory, workers]);
+
+    // Unique list of all tool / item names
+    const uniqueItemNames = useMemo(() => {
+        const items = new Set();
+        equipment.forEach(e => { if (e.name) items.add(e.name.trim()); });
+        borrowHistory.forEach(h => { if (h.tool_name) items.add(h.tool_name.trim()); });
+        return Array.from(items).sort((a, b) => a.localeCompare(b));
+    }, [equipment, borrowHistory]);
+
+    // Date filter helper
+    const checkDateMatch = (rawDate) => {
+        if (filterDatePreset === 'All' && !filterDateFrom && !filterDateTo) return true;
+        if (!rawDate) return false;
+        const d = new Date(rawDate);
+        if (isNaN(d.getTime())) return false;
+
+        const now = new Date();
+        const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+        const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+        if (filterDatePreset === 'Today') {
+            return d >= todayStart && d <= todayEnd;
+        }
+        if (filterDatePreset === 'This Week') {
+            const startOfWeek = new Date(now);
+            startOfWeek.setDate(now.getDate() - now.getDay());
+            startOfWeek.setHours(0, 0, 0, 0);
+            return d >= startOfWeek && d <= now;
+        }
+        if (filterDatePreset === 'This Month') {
+            return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+        }
+        if (filterDatePreset === 'Custom' || filterDateFrom || filterDateTo) {
+            if (filterDateFrom) {
+                const f = new Date(filterDateFrom);
+                f.setHours(0, 0, 0, 0);
+                if (d < f) return false;
+            }
+            if (filterDateTo) {
+                const t = new Date(filterDateTo);
+                t.setHours(23, 59, 59, 999);
+                if (d > t) return false;
+            }
+            return true;
+        }
+        return true;
+    };
+
+    // Check if any filter is active
+    const isFilterActive = searchItem.trim() !== '' ||
+        filterItemSelect !== 'All' ||
+        filterBorrower !== 'All' ||
+        filterStatus !== 'All' ||
+        filterDatePreset !== 'All' ||
+        filterDateFrom !== '' ||
+        filterDateTo !== '';
+
+    const clearFilters = () => {
+        setSearchItem('');
+        setFilterItemSelect('All');
+        setFilterBorrower('All');
+        setFilterStatus('All');
+        setFilterDatePreset('All');
+        setFilterDateFrom('');
+        setFilterDateTo('');
+    };
+
+    // Filtered lists for each table
+    const filteredGroupedEquipment = useMemo(() => {
+        return groupedEquipment.filter(item => {
+            if (searchItem.trim()) {
+                const q = searchItem.toLowerCase().trim();
+                if (!item.name?.toLowerCase().includes(q)) return false;
+            }
+            if (filterItemSelect !== 'All') {
+                if (item.name?.toLowerCase() !== filterItemSelect.toLowerCase()) return false;
+            }
+            if (filterStatus !== 'All') {
+                if (item.status?.toLowerCase() !== filterStatus.toLowerCase()) return false;
+            }
+            if (filterBorrower !== 'All') {
+                const b = (item.borrower || item.assigned_to || item.user || '').toLowerCase();
+                if (b !== filterBorrower.toLowerCase()) return false;
+            }
+            if (filterDatePreset !== 'All' || filterDateFrom || filterDateTo) {
+                if (item.status === 'In Use') {
+                    if (!checkDateMatch(item.borrow_at || item.updated_at || item.created_at)) return false;
+                }
+            }
+            return true;
+        });
+    }, [groupedEquipment, searchItem, filterItemSelect, filterStatus, filterBorrower, filterDatePreset, filterDateFrom, filterDateTo]);
+
+    const filteredUnreturnedTools = useMemo(() => {
+        return unreturnedTools.filter(tool => {
+            if (!checkDateMatch(tool.borrow_at || tool.updated_at || tool.created_at)) {
+                return false;
+            }
+            const borrower = tool.borrower || tool.assigned_to || tool.user || '';
+            if (filterBorrower !== 'All' && borrower.toLowerCase() !== filterBorrower.toLowerCase()) {
+                return false;
+            }
+            if (searchItem.trim() && !tool.name?.toLowerCase().includes(searchItem.toLowerCase().trim())) {
+                return false;
+            }
+            if (filterItemSelect !== 'All' && tool.name?.toLowerCase() !== filterItemSelect.toLowerCase()) {
+                return false;
+            }
+            return true;
+        });
+    }, [unreturnedTools, filterBorrower, searchItem, filterItemSelect, filterDatePreset, filterDateFrom, filterDateTo]);
+
+    const filteredBorrowHistory = useMemo(() => {
+        return borrowHistory.filter(record => {
+            if (!checkDateMatch(record.date_time || record.created_at)) {
+                return false;
+            }
+            const borrower = record.borrower_name || record.assigned_to || '';
+            if (filterBorrower !== 'All' && borrower.toLowerCase() !== filterBorrower.toLowerCase()) {
+                return false;
+            }
+            if (searchItem.trim() && !record.tool_name?.toLowerCase().includes(searchItem.toLowerCase().trim())) {
+                return false;
+            }
+            if (filterItemSelect !== 'All' && record.tool_name?.toLowerCase() !== filterItemSelect.toLowerCase()) {
+                return false;
+            }
+            return true;
+        });
+    }, [borrowHistory, filterBorrower, searchItem, filterItemSelect, filterDatePreset, filterDateFrom, filterDateTo]);
+    const unreturnedGrouped = Object.values(filteredUnreturnedTools.reduce((acc, tool) => {
+        const borrower = tool.borrower || tool.user || tool.assigned_to || 'Site Worker';
+        const condition = tool.condition || tool.type || 'Good';
+        const key = `${tool.name}||${borrower}||${condition}`;
+        if (!acc[key]) {
+            acc[key] = { ...tool, borrower, condition, qty: 1 };
+        } else {
+            acc[key].qty += 1;
+        }
+        return acc;
+    }, {}));
+    const equipmentPagination = usePagination(filteredGroupedEquipment, `${searchItem}|${filterItemSelect}|${filterStatus}|${filterBorrower}|${filterDatePreset}|${filterDateFrom}|${filterDateTo}`);
+    const unreturnedPagination = usePagination(unreturnedGrouped, `${searchItem}|${filterItemSelect}|${filterBorrower}|${filterDatePreset}|${filterDateFrom}|${filterDateTo}`);
+    const historyPagination = usePagination(filteredBorrowHistory, `${searchItem}|${filterItemSelect}|${filterBorrower}|${filterDatePreset}|${filterDateFrom}|${filterDateTo}`);
+
+    const selectStyles = {
+        backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%236b7280'%3e%3cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 9l-7 7-7-7'/%3e%3c/svg%3e")`,
+        backgroundPosition: 'right 0.5rem center',
+        backgroundRepeat: 'no-repeat',
+        backgroundSize: '0.8rem 0.8rem'
+    };
+
+    return (
+        <AdminLayout>
+            <datalist id="workers-list">
+                {workers
+                    .filter(w => !formData.user || w.name.toLowerCase().startsWith(formData.user.toLowerCase()))
+                    .map(w => (
+                        <option key={w.id} value={w.name} />
+                    ))}
+            </datalist>
+
+            {/* ── HEADER ── */}
+            <div className="mb-4">
+                <span className="text-[11px] font-bold text-[#A63228] tracking-widest uppercase">TOOLS MANAGEMENT</span>
+                <h1 className="text-xl font-extrabold text-gray-900 mt-0.5 tracking-tight">Tools Management</h1>
+                <p className="text-[10px] text-gray-500 mt-0.5">Track, lend, and monitor construction tools and equipment.</p>
+            </div>
+
+            {/* ── ALIGNED PROJECT SELECTOR & BUTTONS ── */}
+            <div className="flex flex-col md:flex-row justify-between items-start md:items-end mb-4 gap-3">
+                <div className="w-full md:w-auto">
+                    <label className="block text-[11px] font-bold text-gray-400 tracking-wider uppercase mb-1">PROJECT</label>
+                    <select value={currentProjectId} onChange={handleProjectChange} className="bg-white border border-gray-100 shadow-sm rounded-lg pl-2.5 pr-6 py-1.5 text-[10px] font-extrabold text-gray-800 outline-none appearance-none w-full md:w-auto min-w-[260px]" style={selectStyles}>
+                        {dropdownProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                </div>
+
+                <div className="flex items-center gap-2 w-full md:w-auto flex-wrap">
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setFormData({ name: '', status: 'Available', condition: 'Good', user: '', quantity: 1, borrowQty: 1 });
+                            setModalState('ADD');
+                        }}
+                        className="bg-[#E8C547] border border-[#E8C547] text-gray-900 min-w-[110px] h-8 px-3.5 rounded-lg font-bold text-[10px] shadow-xs hover:bg-[#d4b33d] transition-colors flex items-center justify-center gap-1 cursor-pointer"
+                    >
+                        <span>+</span> Add Tools
+                    </button>
+                    <button onClick={handleOpenBorrowModal} className="bg-[#A63228] border border-[#A63228] text-white min-w-[110px] h-8 px-3.5 rounded-lg font-bold text-[10px] shadow-xs hover:bg-[#8B1A10] transition-colors flex items-center justify-center">
+                        Borrow Tool
+                    </button>
+                </div>
+            </div>
+
+            {/* ── ACTIVE ACKNOWLEDGMENT & STATUS BANNER ── */}
+            {unreturnedTools.length > 0 && (
+                <div className="bg-white border-l-4 border-l-[#A63228] border-y border-r border-gray-100 rounded-lg p-3 mb-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 shadow-xs">
+                    <div className="flex items-center gap-2.5">
+                        <span className="w-2.5 h-2.5 rounded-full bg-[#A63228] animate-pulse"></span>
+                        <div>
+                            <p className="text-[11px] font-extrabold text-gray-900">
+                                Active Notice: <span className="text-[#A63228]">{unreturnedTools.length} tool(s)</span> currently borrowed by workers.
+                            </p>
+                            <p className="text-[11px] text-gray-500">
+                                Live updates are enabled. Acknowledging directs to unreturned list and history log.
+                            </p>
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={() => {
+                                setFilterStatus('In Use');
+                                const el = document.getElementById('unreturned-tools-section');
+                                if (el) el.scrollIntoView({ behavior: 'smooth' });
+                            }}
+                            className="text-[11px] font-extrabold text-white bg-[#A63228] hover:bg-[#8B1A10] px-3 py-1.5 rounded-lg shadow-xs transition-colors cursor-pointer"
+                        >
+                            Acknowledge & View Borrowed
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* ── KPI METRICS ── */}
+            <div className="flex gap-2 mb-3">
+                <div className="flex-1 bg-white rounded-lg p-2.5 text-center border border-gray-100 shadow-sm">
+                    <h2 className="text-xl font-extrabold text-gray-900">{card1Count}</h2>
+                    <p className="text-[11px] font-bold text-gray-500 tracking-wider mt-0.5 uppercase">{card1Label}</p>
+                </div>
+                <div className="flex-1 bg-white rounded-lg p-2.5 text-center border border-gray-100 shadow-sm">
+                    <h2 className="text-xl font-extrabold text-gray-900">{inUseCount}</h2>
+                    <p className="text-[11px] font-bold text-gray-500 tracking-wider mt-0.5 uppercase">IN USE</p>
+                </div>
+                <div className="flex-1 bg-white rounded-lg p-2.5 text-center border border-gray-100 shadow-sm">
+                    <h2 className="text-xl font-extrabold text-[#A63228]">{maintenanceCount}</h2>
+                    <p className="text-[11px] font-bold text-gray-500 tracking-wider mt-0.5 uppercase">MAINTENANCE</p>
+                </div>
+            </div>
+
+            {/* ── FILTER & SEARCH CONTROLS ── */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-3 mb-3">
+                <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center flex-wrap">
+                        {/* Search Tool Name */}
+                        <div className="relative flex-1 min-w-[180px]">
+                            <div className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none">
+                                <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                                </svg>
+                            </div>
+                            <input
+                                type="text"
+                                value={searchItem}
+                                onChange={(e) => setSearchItem(e.target.value)}
+                                placeholder="Search tool name..."
+                                className="w-full bg-[#f9fafb] border border-gray-200 rounded-lg pl-8 pr-7 py-1.5 text-[11px] font-medium text-gray-800 placeholder-gray-400 outline-none focus:border-[#A63228] transition-colors"
+                            />
+                            {searchItem && (
+                                <button
+                                    onClick={() => setSearchItem('')}
+                                    className="absolute inset-y-0 right-0 pr-2.5 flex items-center text-gray-400 hover:text-gray-600 text-xs font-bold"
+                                    title="Clear item search"
+                                >
+                                    ✕
+                                </button>
+                            )}
+                        </div>
+
+                        {/* Filter by Item Dropdown */}
+                        <div className="w-full sm:w-auto min-w-[130px]">
+                            <select
+                                value={filterItemSelect}
+                                onChange={(e) => setFilterItemSelect(e.target.value)}
+                                className="w-full bg-[#f9fafb] border border-gray-200 rounded-lg pl-2.5 pr-6 py-1.5 text-[10px] font-bold text-gray-700 outline-none appearance-none focus:border-[#A63228]"
+                                style={selectStyles}
+                            >
+                                <option value="All">All Items ({uniqueItemNames.length})</option>
+                                {uniqueItemNames.map(item => (
+                                    <option key={item} value={item}>{item}</option>
+                                ))}
+                            </select>
+                        </div>
+
+                        {/* Filter by Borrower ("Kung Sino Humiram") Dropdown */}
+                        <div className="w-full sm:w-auto min-w-[150px]">
+                            <select
+                                value={filterBorrower}
+                                onChange={(e) => setFilterBorrower(e.target.value)}
+                                className="w-full bg-[#f9fafb] border border-gray-200 rounded-lg pl-2.5 pr-6 py-1.5 text-[10px] font-bold text-gray-700 outline-none appearance-none focus:border-[#A63228]"
+                                style={selectStyles}
+                            >
+                                <option value="All">All Borrowers</option>
+                                {borrowerList.map(name => {
+                                    const isActive = activeBorrowerNames.has(name);
+                                    return (
+                                        <option key={name} value={name}>
+                                            {name}{isActive ? ' (Active)' : ''}
+                                        </option>
+                                    );
+                                })}
+                            </select>
+                        </div>
+
+                        {/* Filter by Status Dropdown */}
+                        <div className="w-full sm:w-auto min-w-[120px]">
+                            <select
+                                value={filterStatus}
+                                onChange={(e) => setFilterStatus(e.target.value)}
+                                className="w-full bg-[#f9fafb] border border-gray-200 rounded-lg pl-2.5 pr-6 py-1.5 text-[10px] font-bold text-gray-700 outline-none appearance-none focus:border-[#A63228]"
+                                style={selectStyles}
+                            >
+                                <option value="All">All Statuses</option>
+                                <option value="Available">Available</option>
+                                <option value="In Use">In Use (Borrowed)</option>
+                                <option value="Maintenance">Maintenance</option>
+                            </select>
+                        </div>
+
+                        {/* Date Filter Preset Dropdown */}
+                        <div className="w-full sm:w-auto min-w-[130px]">
+                            <select
+                                value={filterDatePreset}
+                                onChange={(e) => setFilterDatePreset(e.target.value)}
+                                className="w-full bg-[#f9fafb] border border-gray-200 rounded-lg pl-2.5 pr-6 py-1.5 text-[10px] font-bold text-gray-700 outline-none appearance-none focus:border-[#A63228]"
+                                style={selectStyles}
+                            >
+                                <option value="All">All Dates</option>
+                                <option value="Today">Today</option>
+                                <option value="This Week">This Week</option>
+                                <option value="This Month">This Month</option>
+                                <option value="Custom">Custom Range...</option>
+                            </select>
+                        </div>
+
+                        {/* Custom Date Inputs if 'Custom' selected */}
+                        {filterDatePreset === 'Custom' && (
+                            <div className="flex items-center gap-1.5 w-full sm:w-auto">
+                                <input
+                                    type="date"
+                                    value={filterDateFrom}
+                                    onChange={(e) => setFilterDateFrom(e.target.value)}
+                                    title="From Date"
+                                    className="bg-[#f9fafb] border border-gray-200 rounded-lg px-2 py-1 text-[11px] font-bold text-gray-700 outline-none focus:border-[#A63228]"
+                                />
+                                <span className="text-[10px] text-gray-400 font-bold">to</span>
+                                <input
+                                    type="date"
+                                    value={filterDateTo}
+                                    onChange={(e) => setFilterDateTo(e.target.value)}
+                                    title="To Date"
+                                    className="bg-[#f9fafb] border border-gray-200 rounded-lg px-2 py-1 text-[11px] font-bold text-gray-700 outline-none focus:border-[#A63228]"
+                                />
+                            </div>
+                        )}
+                </div>
+            </div>
+
+            {/* ── EQUIPMENT INVENTORY ── */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-3 mb-3 overflow-x-auto">
+                <div className="flex justify-between items-center mb-2 pl-2 pr-2">
+                    <h3 className="text-[11px] font-extrabold text-gray-900 tracking-wider uppercase">EQUIPMENT INVENTORY</h3>
+                    {filterBorrower !== 'All' && (
+                        <span className="text-[11px] font-bold text-gray-500 bg-gray-100 px-2 py-0.5 rounded">
+                            Filtered Borrower: <strong className="text-gray-900">{filterBorrower}</strong>
+                        </span>
+                    )}
+                </div>
+                <table className="w-full text-left border-collapse min-w-[750px]">
+                    <thead>
+                        <tr>
+                            <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[22%] uppercase tracking-wider pl-2">EQUIPMENT</th>
+                            <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[8%] uppercase tracking-wider text-center">QTY</th>
+                            <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[16%] uppercase tracking-wider">STATUS</th>
+                            <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[18%] uppercase tracking-wider">BORROWER</th>
+                            <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[16%] uppercase tracking-wider">CONDITION</th>
+                            <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[20%] uppercase tracking-wider text-center pr-2">ACTION</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {filteredGroupedEquipment.length > 0 ? equipmentPagination.pageItems.map((item) => (
+                            <tr key={`${item.name}-${item.status}-${item.condition}-${item.borrower || 'none'}`}>
+                                <td className="py-2.5 text-[10px] font-extrabold text-gray-900 border-b border-gray-50 pl-2">{item.name}</td>
+                                <td className="py-2.5 border-b border-gray-50 text-center">
+                                    <span className="text-[10px] font-extrabold text-gray-900 bg-gray-100 rounded-full px-2 py-0.5">{item.qty}</span>
+                                </td>
+                                <td className="py-2.5 border-b border-gray-50">
+                                    <span className={`text-[10px] font-bold tracking-wide ${item.status === 'In Use' ? 'text-[#A63228]' :
+                                        item.status === 'Available' ? 'text-green-700' :
+                                            'text-yellow-700'
+                                        }`}>{item.status}</span>
+                                </td>
+                                <td className="py-2.5 border-b border-gray-50">
+                                    {item.status === 'In Use' ? (
+                                        <span className="text-[11px] font-semibold text-gray-900 bg-red-50/70 border border-red-100 rounded px-1.5 py-0.5 inline-block max-w-[140px] truncate" title={item.borrower}>
+                                            {item.borrower}
+                                        </span>
+                                    ) : (
+                                        <span className="text-[11px] text-gray-400 italic">—</span>
+                                    )}
+                                </td>
+                                <td className="py-2.5 border-b border-gray-50">
+                                    <span className={`text-[11px] font-bold rounded-full px-2 py-0.5 ${item.condition === 'Good' ? 'bg-green-50 text-green-700' :
+                                        item.condition === 'Needs Repair' ? 'bg-yellow-50 text-yellow-700' :
+                                            'bg-red-50 text-red-700'
+                                        }`}>{item.condition || 'Good'}</span>
+                                </td>
+                                <td className="py-2.5 border-b border-gray-50 text-center pr-2">
+                                    <div className="flex items-center justify-center gap-1">
+                                        {item.status === 'Available' ? (
+                                            <button
+                                                onClick={() => handleBorrowClick(item)}
+                                                className="text-[11px] font-extrabold w-[75px] py-1.5 rounded border border-[#A63228] text-[#A63228] hover:bg-[#A63228] hover:text-white uppercase tracking-wider inline-block transition-colors"
+                                            >
+                                                Borrow
+                                            </button>
+                                        ) : (
+                                            <button
+                                                onClick={() => handleActionClick(item)}
+                                                className={`text-[11px] font-extrabold w-[75px] py-1.5 rounded border border-gray-800 text-gray-900 text-center uppercase tracking-wider inline-block transition-colors 
+                                            ${item.status === 'In Use' ? 'hover:bg-[#A63228] hover:border-[#A63228] hover:text-white' :
+                                                        item.status === 'Returned' ? 'hover:bg-gray-600 hover:border-gray-600 hover:text-white' :
+                                                            'hover:bg-[#ca8a04] hover:border-[#ca8a04] hover:text-white'
+                                                    }`}
+                                            >
+                                                {item.status === 'In Use' ? 'Return' : item.status === 'Returned' ? 'View Log' : 'Repair Log'}
+                                            </button>
+                                        )}
+                                        <button onClick={() => handleEditClick(item)} title="Edit" className="text-[11px] font-bold text-blue-400 hover:text-blue-600 transition-colors px-1">✎</button>
+                                        <button onClick={() => item.ids.forEach(id => handleDeleteAsset(id))} title="Delete" className="text-[11px] font-bold text-gray-400 hover:text-red-600 transition-colors px-1">✕</button>
+                                    </div>
+                                </td>
+                            </tr>
+                        )) : (
+                            <tr><td colSpan="6" className="py-8 text-center text-xs text-gray-400 italic">{isFilterActive ? 'No equipment matching the selected filter criteria.' : 'No equipment logged for this project.'}</td></tr>
+                        )}
+                    </tbody>
+                </table>
+                <Pagination {...equipmentPagination} />
+            </div>
+
+            <div id="unreturned-tools-section" className="bg-white p-3.5 rounded-xl shadow-sm border border-gray-100 mb-4 overflow-x-auto">
+                <div className="flex justify-between items-center mb-0.5">
+                    <h3 className="text-[11px] font-extrabold text-[#A63228] tracking-wider uppercase">UNRETURNED TOOLS</h3>
+                    {filterBorrower !== 'All' && (
+                        <span className="text-[11px] font-bold text-gray-500 bg-gray-100 px-2 py-0.5 rounded">
+                            Borrower: <strong className="text-[#A63228]">{filterBorrower}</strong>
+                        </span>
+                    )}
+                </div>
+                <p className="text-[11px] text-gray-500 mb-2.5">
+                    {filterBorrower !== 'All' ? `Tools currently borrowed by ${filterBorrower}.` : 'Tools currently in use and not returned.'}
+                </p>
+                {filteredUnreturnedTools.length === 0 ? (
+                    <p className="text-[11px] text-gray-400 italic py-2">
+                        {isFilterActive ? 'No unreturned tools match the active filters.' : 'All tools returned.'}
+                    </p>
+                ) : (
+                    <>
+                    <table className="w-full text-left border-collapse min-w-[600px]">
+                        <thead>
+                            <tr>
+                                <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[22%] uppercase tracking-wider">TOOL NAME</th>
+                                <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[22%] uppercase tracking-wider">BORROWER</th>
+                                <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[8%] uppercase tracking-wider text-center">QTY</th>
+                                <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[15%] uppercase tracking-wider">CONDITION</th>
+                                <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[18%] uppercase tracking-wider">DATE BORROWED</th>
+                                <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[15%] uppercase tracking-wider">TIME</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {unreturnedPagination.pageItems.map((tool, idx) => {
+                                const borrower = tool.borrower;
+                                const rawDate = tool.borrow_at || tool.updated_at || tool.created_at;
+                                const borrowDate = rawDate ? new Date(rawDate) : null;
+                                const dateStr = (borrowDate && !isNaN(borrowDate.getTime())) ? borrowDate.toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' }) : '—';
+                                const timeStr = (borrowDate && !isNaN(borrowDate.getTime())) ? borrowDate.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit', hour12: true }) : '—';
+                                const cond = tool.condition || 'Good';
+                                return (
+                                    <tr key={idx}>
+                                        <td className="py-2.5 text-[10px] font-extrabold text-gray-900 border-b border-gray-50">{tool.name}</td>
+                                        <td className="py-2.5 text-[11px] font-medium text-gray-800 border-b border-gray-50">{borrower}</td>
+                                        <td className="py-2.5 border-b border-gray-50 text-center">
+                                            <span className="text-[10px] font-extrabold text-gray-900 bg-gray-100 rounded-full px-2 py-0.5">{tool.qty}</span>
+                                        </td>
+                                        <td className="py-2.5 border-b border-gray-50">
+                                            <span className={`text-[11px] font-bold rounded-full px-2 py-0.5 ${cond === 'Good' ? 'bg-green-50 text-green-700' :
+                                                cond === 'Needs Repair' ? 'bg-yellow-50 text-yellow-700' :
+                                                    'bg-red-50 text-red-700'
+                                                }`}>{cond}</span>
+                                        </td>
+                                        <td className="py-2.5 text-[11px] text-gray-600 border-b border-gray-50">
+                                            {dateStr}
+                                            {tool.expected_return_date && (
+                                                <span className="block text-[11px] font-semibold text-[#A63228]">
+                                                    Due: {tool.expected_return_date}
+                                                    {tool.expected_return_time ? ` • ${tool.expected_return_time}` : ''}
+                                                </span>
+                                            )}
+                                        </td>
+                                        <td className="py-2.5 text-[11px] text-gray-600 border-b border-gray-50">{timeStr}</td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                    <Pagination {...unreturnedPagination} />
+                    </>
+                )}
+            </div>
+
+            {/* ── BORROWED TOOLS HISTORY OVERVIEW ── */}
+            <div className="mb-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <div className="bg-white border border-gray-100 rounded-xl p-3 shadow-sm">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-gray-500">Currently Borrowed</p>
+                    <p className="mt-1 text-xl font-extrabold text-[#A63228]">{inUseCount}</p>
+                </div>
+                <div className="bg-white border border-gray-100 rounded-xl p-3 shadow-sm">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-gray-500">Borrow Logs</p>
+                    <p className="mt-1 text-xl font-extrabold text-gray-900">{filteredBorrowHistory.filter(item => ['Check-Out', 'Borrowed', 'Borrow'].includes(item.action)).length}</p>
+                </div>
+                <div className="bg-white border border-gray-100 rounded-xl p-3 shadow-sm">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-gray-500">Return Logs</p>
+                    <p className="mt-1 text-xl font-extrabold text-green-700">{filteredBorrowHistory.filter(item => ['Check-In', 'Returned', 'Return'].includes(item.action)).length}</p>
+                </div>
+            </div>
+
+            {/* ── TOOLS BORROWING & RETURN HISTORY LIST ── */}
+            <div className="bg-white p-3.5 rounded-xl shadow-sm border border-gray-100 mb-6 overflow-x-auto">
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-2.5 gap-2">
+                    <div>
+                        <div className="flex items-center gap-2">
+                            <h3 className="text-[11px] font-extrabold text-gray-900 tracking-wider uppercase">TOOLS BORROWING & RETURN HISTORY LIST</h3>
+                            {filterDatePreset !== 'All' && (
+                                <span className="text-[11px] font-bold text-[#A63228] bg-red-50 border border-red-200 px-1.5 py-0.2 rounded">
+                                    {filterDatePreset}
+                                </span>
+                            )}
+                        </div>
+                        <p className="text-[11px] text-gray-500 mt-0.5">
+                            {filterBorrower !== 'All' ? `History movements for borrower: ${filterBorrower}.` : 'Complete chronological audit log of tool loans, checkouts, and returns.'}
+                        </p>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                        {filterBorrower !== 'All' && (
+                            <span className="text-[11px] font-bold text-gray-500 bg-gray-100 px-2 py-0.5 rounded">
+                                Borrower: <strong className="text-gray-900">{filterBorrower}</strong>
+                            </span>
+                        )}
+                        <span className="text-[11px] font-bold text-gray-600 bg-gray-100 rounded-full px-2.5 py-0.5">
+                            {filteredBorrowHistory.length} Record(s)
+                        </span>
+                    </div>
+                </div>
+                {filteredBorrowHistory.length === 0 ? (
+                    <p className="text-[11px] text-gray-400 italic py-4 text-center">
+                        {isFilterActive ? 'No borrowing history matches the active filter criteria.' : 'No borrowing history recorded yet.'}
+                    </p>
+                ) : (
+                    <>
+                    <table className="w-full text-left border-collapse min-w-[650px]">
+                        <thead>
+                            <tr>
+                                <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[20%] uppercase tracking-wider">TOOL NAME</th>
+                                <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[20%] uppercase tracking-wider">BORROWER</th>
+                                <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[8%] uppercase tracking-wider text-center">QTY</th>
+                                <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[14%] uppercase tracking-wider text-center">ACTION</th>
+                                <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[14%] uppercase tracking-wider">CONDITION</th>
+                                <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[14%] uppercase tracking-wider">DATE</th>
+                                <th className="text-[11px] font-bold text-gray-400 border-b border-gray-100 pb-2 w-[10%] uppercase tracking-wider">TIME</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {historyPagination.pageItems.map((item, idx) => {
+                                const dt = item.date_time ? new Date(item.date_time) : (item.created_at ? new Date(item.created_at) : null);
+                                const dateStr = dt && !isNaN(dt) ? dt.toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' }) : '—';
+                                const timeStr = dt && !isNaN(dt) ? dt.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit', hour12: true }) : '—';
+                                const isBorrow = item.action === 'Check-Out' || item.action === 'Borrowed' || item.action === 'Borrow';
+                                return (
+                                    <tr key={item.id || idx}>
+                                        <td className="py-2.5 text-[10px] font-extrabold text-gray-900 border-b border-gray-50">{item.tool_name}</td>
+                                        <td className="py-2.5 text-[11px] font-medium text-gray-800 border-b border-gray-50">{item.borrower_name || item.assigned_to || '—'}</td>
+                                        <td className="py-2.5 border-b border-gray-50 text-center">
+                                            <span className="text-[10px] font-extrabold text-gray-900 bg-gray-100 rounded-full px-2 py-0.5">{item.quantity || 1}</span>
+                                        </td>
+                                        <td className="py-2.5 border-b border-gray-50 text-center">
+                                            <span className={`text-[11px] font-bold rounded-full px-2 py-0.5 ${isBorrow ? 'bg-red-50 text-[#A63228] border border-red-200' : 'bg-green-50 text-green-700 border border-green-200'
+                                                }`}>
+                                                {isBorrow ? 'Borrowed' : (item.action === 'Check-In' || item.action === 'Returned' || item.action === 'Return' ? 'Returned' : item.action)}
+                                            </span>
+                                        </td>
+                                        <td className="py-2.5 border-b border-gray-50">
+                                            <span className={`text-[11px] font-bold rounded-full px-2 py-0.5 ${item.condition_status === 'Good' ? 'bg-green-50 text-green-700' :
+                                                item.condition_status === 'Needs Repair' ? 'bg-yellow-50 text-yellow-700' :
+                                                    'bg-red-50 text-red-700'
+                                                }`}>{item.condition_status || 'Good'}</span>
+                                        </td>
+                                        <td className="py-2.5 text-[11px] text-gray-600 border-b border-gray-50">{dateStr}</td>
+                                        <td className="py-2.5 text-[11px] text-gray-600 border-b border-gray-50">{timeStr}</td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                    <Pagination {...historyPagination} />
+                    </>
+                )}
+            </div>
+
+            {/* ═════════ MODALS (ENLARGED, NO ICONS) ═════════ */}
+
+            {modalState === 'BORROW' && selectedEquipment && (
+                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 transition-all">
+                    <div className="bg-white rounded-2xl w-full max-w-[480px] shadow-2xl relative">
+                        <div className="p-6 border-b border-gray-100 flex justify-between items-center">
+                            <div>
+                                <h3 className="text-xl font-extrabold text-[#1a1a1a]">Borrow Tool</h3>
+                                <p className="text-sm text-gray-500 font-medium mt-1">
+                                    Lending <strong className="text-gray-900">{selectedEquipment.name}</strong> to a field worker
+                                </p>
+                            </div>
+                            <button onClick={resetAndClose} className="text-2xl font-bold text-gray-400 hover:text-gray-700">&times;</button>
+                        </div>
+                        <form onSubmit={submitBorrow} className="p-6 flex flex-col gap-5">
+                            <div>
+                                <label className="block text-sm font-bold text-gray-700 mb-2 uppercase tracking-wider">Select Tool</label>
+                                <select
+                                    value={selectedEquipment.name}
+                                    onChange={(e) => {
+                                        const found = groupedEquipment.find(g => g.name === e.target.value && g.status === 'Available');
+                                        if (found) {
+                                            setSelectedEquipment(found);
+                                            setFormData(prev => ({ ...prev, name: found.name, quantity: found.qty || 1, borrowQty: 1 }));
+                                        }
+                                    }}
+                                    className="w-full bg-[#f4f1ee] border border-transparent rounded-xl pl-4 pr-8 py-3 text-sm font-medium outline-none appearance-none"
+                                    style={selectStyles}
+                                >
+                                    {groupedEquipment.filter(g => g.status === 'Available').map(g => (
+                                        <option key={g.name} value={g.name}>
+                                            {g.name} ({g.qty} available)
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-bold text-gray-700 mb-2 uppercase tracking-wider">
+                                        Quantity <span className="font-normal text-gray-400">(max {selectedEquipment.qty || 1})</span>
+                                    </label>
+                                    <input
+                                        type="number"
+                                        name="borrowQty"
+                                        min="1"
+                                        max={selectedEquipment.qty || 1}
+                                        value={formData.borrowQty}
+                                        onChange={handleInputChange}
+                                        required
+                                        className="w-full bg-[#f4f1ee] border border-transparent rounded-xl px-4 py-3 text-sm font-medium focus:border-[#A63228] outline-none"
+                                    />
+                                    <p className="mt-1 text-xs text-gray-500">If no time is set, the tool is due by the end of that date.</p>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-bold text-gray-700 mb-2 uppercase tracking-wider">Tool Condition</label>
+                                    <select
+                                        name="condition"
+                                        value={formData.condition}
+                                        onChange={handleInputChange}
+                                        className="w-full bg-[#f4f1ee] border border-transparent rounded-xl pl-4 pr-8 py-3 text-sm font-medium outline-none appearance-none"
+                                        style={selectStyles}
+                                    >
+                                        <option value="Good">Good</option>
+                                        <option value="Needs Repair">Needs Repair</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-sm font-bold text-gray-700 mb-2 uppercase tracking-wider">Borrower / Worker Name</label>
+                                <input
+                                    type="text"
+                                    name="user"
+                                    list="workers-list"
+                                    value={formData.user}
+                                    onChange={handleInputChange}
+                                    required
+                                    placeholder="Select or enter worker name..."
+                                    className="w-full bg-[#f4f1ee] border border-transparent rounded-xl px-4 py-3 text-sm font-medium focus:border-[#A63228] outline-none"
+                                />
+                                {workers.length > 0 && (
+                                    <div className="flex flex-wrap gap-1.5 mt-2 max-h-24 overflow-y-auto">
+                                        {workers.slice(0, 6).map(w => (
+                                            <button
+                                                key={w.id}
+                                                type="button"
+                                                onClick={() => setFormData(prev => ({ ...prev, user: w.name }))}
+                                                className={`text-[10px] font-bold px-2 py-1 rounded-md transition-colors ${formData.user === w.name ? 'bg-[#A63228] text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+                                            >
+                                                {w.name}
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-bold text-gray-700 mb-2 uppercase tracking-wider">
+                                        Expected Return Date
+                                    </label>
+                                    <input
+                                        type="date"
+                                        name="expectedReturnDate"
+                                        min={todayDate}
+                                        value={formData.expectedReturnDate || ''}
+                                        onChange={handleInputChange}
+                                        required
+                                        className="w-full bg-[#f4f1ee] border border-transparent rounded-xl px-4 py-3 text-sm font-medium focus:border-[#A63228] outline-none"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-bold text-gray-700 mb-2 uppercase tracking-wider">
+                                        Return Time <span className="font-normal text-gray-400">(optional)</span>
+                                    </label>
+                                    <input
+                                        type="time"
+                                        name="expectedReturnTime"
+                                        value={formData.expectedReturnTime || ''}
+                                        onChange={handleInputChange}
+                                        className="w-full bg-[#f4f1ee] border border-transparent rounded-xl px-4 py-3 text-sm font-medium focus:border-[#A63228] outline-none"
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="flex gap-3 mt-2">
+                                <button
+                                    type="button"
+                                    onClick={resetAndClose}
+                                    className="flex-1 py-3 bg-white border border-[#A63228] text-[#A63228] rounded-xl text-sm font-extrabold hover:bg-red-50 transition-colors uppercase tracking-wider"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="submit"
+                                    className="flex-1 py-3 bg-[#8B1A10] text-white rounded-xl text-sm font-extrabold hover:bg-[#72150d] transition-colors shadow-sm uppercase tracking-wider"
+                                >
+                                    Confirm Borrow
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {modalState === 'EDIT' && selectedEquipment && (
+                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 transition-all">
+                    <div className="bg-white rounded-2xl w-full max-w-[480px] shadow-2xl relative">
+                        <div className="p-6 border-b border-gray-100 flex justify-between items-center">
+                            <div>
+                                <h3 className="text-xl font-extrabold text-[#1a1a1a]">Edit Tool</h3>
+                                <p className="text-sm text-gray-500 font-medium mt-1">Editing <strong className="text-gray-900">{selectedEquipment.name}</strong>{selectedEquipment.qty > 1 ? ` (${selectedEquipment.qty} items)` : ''}</p>
+                            </div>
+                            <button onClick={resetAndClose} className="text-2xl font-bold text-gray-400 hover:text-gray-700">&times;</button>
+                        </div>
+                        <form onSubmit={submitEdit} className="p-6 flex flex-col gap-5">
+                            <div>
+                                <label className="block text-sm font-bold text-gray-700 mb-2 uppercase tracking-wider">Tool Name</label>
+                                <input type="text" name="name" value={formData.name} onChange={handleInputChange} required className="w-full bg-[#f4f1ee] border border-transparent rounded-xl px-4 py-3 text-sm font-medium focus:border-[#A63228] outline-none" placeholder="e.g. Circular Saw" />
+                            </div>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-bold text-gray-700 mb-2 uppercase tracking-wider">Status</label>
+                                    <select name="status" value={formData.status} onChange={handleInputChange} className="w-full bg-[#f4f1ee] border border-transparent rounded-xl pl-4 pr-8 py-3 text-sm font-medium outline-none appearance-none" style={selectStyles}>
+                                        <option value="Available">Available</option>
+                                        <option value="In Use">In Use</option>
+                                        <option value="Maintenance">Maintenance</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-bold text-gray-700 mb-2 uppercase tracking-wider">Condition</label>
+                                    <select name="condition" value={formData.condition} onChange={handleInputChange} className="w-full bg-[#f4f1ee] border border-transparent rounded-xl pl-4 pr-8 py-3 text-sm font-medium outline-none appearance-none" style={selectStyles}>
+                                        <option value="Good">Good</option>
+                                        <option value="Needs Repair">Needs Repair</option>
+                                        <option value="Broken">Broken</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div className="flex gap-3 mt-2">
+                                <button type="button" onClick={resetAndClose} className="flex-1 py-3 bg-white border border-gray-300 text-gray-700 rounded-xl text-sm font-extrabold hover:bg-gray-50 transition-colors uppercase tracking-wider">Cancel</button>
+                                <button type="submit" className="flex-1 py-3 bg-[#E8C547] text-gray-900 rounded-xl text-sm font-extrabold hover:bg-[#d4b33d] transition-colors shadow-sm uppercase tracking-wider">Save Changes</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+
+
+            {modalState === 'CHECK_IN' && selectedEquipment && (
+                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 transition-all">
+                    <div className="bg-white rounded-2xl w-full max-w-[480px] shadow-2xl relative">
+                        <div className="p-6 border-b border-gray-100 flex justify-between items-center">
+                            <div>
+                                <h3 className="text-xl font-extrabold text-[#1a1a1a]">Return Tool</h3>
+                                <p className="text-sm text-gray-500 font-medium mt-1">Returning <strong className="text-gray-900">{selectedEquipment.name}</strong> <span className="text-[#A63228]">({selectedEquipment.qty || 1} in use)</span></p>
+                            </div>
+                            <button onClick={resetAndClose} className="text-2xl font-bold text-gray-400 hover:text-gray-700">&times;</button>
+                        </div>
+                        <form onSubmit={submitCheckIn} className="p-6 flex flex-col gap-5">
+                            <div>
+                                <label className="block text-sm font-bold text-gray-700 mb-2 uppercase tracking-wider">Quantity to Return <span className="font-normal text-gray-400">(max {selectedEquipment.qty || 1})</span></label>
+                                <input type="number" name="borrowQty" min="1" max={selectedEquipment.qty || 1} value={formData.borrowQty} onChange={handleInputChange} required className="w-full bg-[#f4f1ee] border border-transparent rounded-xl px-4 py-3 text-sm font-medium focus:border-[#A63228] outline-none" />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-bold text-gray-700 mb-2 uppercase tracking-wider">Assess Tool Condition</label>
+                                <select name="condition" value={formData.condition} onChange={handleInputChange} className="w-full bg-[#f4f1ee] border border-transparent rounded-xl pl-4 pr-8 py-3 text-sm font-medium outline-none appearance-none" style={selectStyles}>
+                                    <option value="Good">Good Working Condition</option>
+                                    <option value="Needs Repair">Needs Repair (Maintenance)</option>
+                                    <option value="Broken">Broken / Damaged</option>
+                                </select>
+                            </div>
+                            <div className="flex gap-3 mt-2">
+                                <button type="button" onClick={resetAndClose} className="flex-1 py-3 bg-white border border-[#A63228] text-[#A63228] rounded-xl text-sm font-extrabold hover:bg-red-50 transition-colors uppercase tracking-wider">Cancel</button>
+                                <button type="submit" className="flex-1 py-3 bg-[#8B1A10] text-white rounded-xl text-sm font-extrabold hover:bg-[#72150d] transition-colors shadow-sm uppercase tracking-wider">Confirm Return</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {modalState === 'REPAIR' && selectedEquipment && (
+                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 transition-all">
+                    <div className="bg-white rounded-2xl w-full max-w-[480px] shadow-2xl relative text-center">
+                        <div className="p-8 flex flex-col items-center">
+                            <h3 className="text-2xl font-extrabold text-[#1a1a1a] mb-3">Mark as Repaired</h3>
+                            <p className="text-sm text-gray-500 mb-8 leading-relaxed">
+                                Confirm that the <strong className="text-gray-900">{selectedEquipment.name}</strong> is fully repaired and ready to be borrowed again.
+                            </p>
+                            <div className="flex gap-3 w-full">
+                                <button onClick={resetAndClose} className="flex-1 py-3 bg-white border border-gray-300 text-gray-700 rounded-xl text-sm font-extrabold hover:bg-gray-50 transition-colors uppercase tracking-wider">Cancel</button>
+                                <button onClick={submitRepair} className="flex-1 py-3 bg-[#2e7d32] text-white rounded-xl text-sm font-extrabold hover:bg-[#1b5e20] transition-colors shadow-sm uppercase tracking-wider">Set to Available</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {modalState === 'SCANNING' && (
+                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 transition-all">
+                    <div className="bg-white rounded-2xl p-8 w-full max-w-[400px] shadow-2xl text-center relative flex flex-col items-center">
+                        <h3 className="text-xl font-extrabold text-[#A63228] mb-3 uppercase tracking-widest animate-pulse">Scanning...</h3>
+                        <p className="text-sm text-gray-600 font-medium mb-8">Please tap the tool's RFID tag on the physical scanner.</p>
+                        <button onClick={resetAndClose} className="w-full py-3 bg-white border border-gray-300 text-gray-700 rounded-xl text-sm font-extrabold hover:bg-gray-50 transition-colors uppercase tracking-wider">Cancel Scan</button>
+                    </div>
+                </div>
+            )}
+
+            {modalState === 'ADD' && (
+                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 transition-all">
+                    <div className="bg-white rounded-2xl w-full max-w-[480px] shadow-2xl relative overflow-hidden">
+                        <div className="p-6 border-b border-gray-100 flex justify-between items-center">
+                            <div>
+                                <h3 className="text-xl font-extrabold text-[#1a1a1a]">Add Tools</h3>
+                                <p className="text-sm text-gray-500 font-medium mt-1">Register new tools to inventory.</p>
+                            </div>
+                            <button onClick={resetAndClose} className="text-2xl font-bold text-gray-400 hover:text-gray-700">&times;</button>
+                        </div>
+                        <form onSubmit={handleConfirmAdd} className="p-6 flex flex-col gap-5">
+                            <div>
+                                <label className="block text-sm font-bold text-gray-700 mb-2 uppercase tracking-wider">Tool Name</label>
+                                <input type="text" name="name" value={formData.name} onChange={handleInputChange} required className="w-full bg-[#f4f1ee] border border-transparent rounded-xl px-4 py-3 text-sm font-medium focus:border-[#A63228] outline-none" placeholder="e.g. Circular Saw" />
+                            </div>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-bold text-gray-700 mb-2 uppercase tracking-wider">Quantity</label>
+                                    <input type="number" name="quantity" min="1" value={formData.quantity} onChange={handleInputChange} required className="w-full bg-[#f4f1ee] border border-transparent rounded-xl px-4 py-3 text-sm font-medium focus:border-[#A63228] outline-none" placeholder="1" />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-bold text-gray-700 mb-2 uppercase tracking-wider">Condition</label>
+                                    <select name="condition" value={formData.condition} onChange={handleInputChange} className="w-full bg-[#f4f1ee] border border-transparent rounded-xl pl-4 pr-8 py-3 text-sm font-medium focus:border-[#A63228] outline-none appearance-none" style={selectStyles}>
+                                        <option value="Good">Good</option>
+                                        <option value="Needs Repair">Needs Repair</option>
+                                        <option value="Broken">Broken</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div className="flex gap-3 mt-2">
+                                <button type="button" onClick={resetAndClose} className="flex-1 py-3 bg-white border border-[#A63228] text-[#A63228] rounded-xl text-sm font-extrabold hover:bg-red-50 transition-colors uppercase tracking-wider">Cancel</button>
+                                <button type="submit" className="flex-1 py-3 bg-[#E8C547] text-gray-900 rounded-xl text-sm font-extrabold hover:bg-[#d4b33d] transition-colors shadow-sm uppercase tracking-wider">Add to Inventory</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {modalState === 'SUCCESS' && (
+                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 transition-all">
+                    <div className="bg-white rounded-2xl p-8 w-full max-w-[360px] shadow-2xl text-center relative">
+                        <h3 className="text-2xl font-extrabold text-[#2e7d32] mb-3 uppercase tracking-widest">Success</h3>
+                        <p className="text-sm text-gray-600 font-medium mb-8 leading-snug">{successMsg}</p>
+                        <button onClick={resetAndClose} className="w-full py-3 bg-[#8B1A10] text-white rounded-xl text-sm font-extrabold hover:bg-[#72150d] uppercase tracking-wider">Done</button>
+                    </div>
+                </div>
+            )}
+        </AdminLayout>
+    )
+}

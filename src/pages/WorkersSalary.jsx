@@ -1,0 +1,1107 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import AdminLayout from '../components/AdminLayout';
+import { api } from '../api';
+import Pagination from '../components/Pagination';
+import { usePagination } from '../components/usePagination';
+
+export default function WorkersSalary() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = searchParams.get('tab') === 'history' ? 'history' : 'worksheet';
+
+  const updateTab = (tab) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (tab === 'history') {
+        next.set('tab', 'history');
+      } else {
+        next.delete('tab');
+      }
+      return next;
+    }, { replace: true });
+  };
+
+  const [loading, setLoading] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
+
+  // Projects
+  const [projects, setProjects] = useState([]);
+  const [selectedProject, setSelectedProject] = useState('ALL');
+
+  const formatLocalDateInput = (date) => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  // Cutoff Dates
+  const today = new Date();
+  const curYear = today.getFullYear();
+  const curMonth = today.getMonth();
+  const curDate = today.getDate();
+
+  // Default to semi-monthly cutoff
+  const defaultStart = curDate <= 15
+    ? `${curYear}-${String(curMonth + 1).padStart(2, '0')}-01`
+    : `${curYear}-${String(curMonth + 1).padStart(2, '0')}-16`;
+
+  const defaultEnd = curDate <= 15
+    ? `${curYear}-${String(curMonth + 1).padStart(2, '0')}-15`
+    : `${curYear}-${String(curMonth + 1).padStart(2, '0')}-${String(new Date(curYear, curMonth + 1, 0).getDate()).padStart(2, '0')}`;
+
+  const [cutoffPreset, setCutoffPreset] = useState('CurrentSemiMonthly');
+  const [startDate, setStartDate] = useState(defaultStart);
+  const [endDate, setEndDate] = useState(defaultEnd);
+
+  // Payroll Data
+  const [payrollData, setPayrollData] = useState({
+    summary: { totalGrossPay: 0, totalCashAdvances: 0, totalLateDeductions: 0, totalNetPayout: 0, totalWorkers: 0, totalHours: 0 },
+    workers: []
+  });
+  const [searchWorker, setSearchWorker] = useState('');
+  const [selectedWorkerModal, setSelectedWorkerModal] = useState(null);
+  const [calcError, setCalcError] = useState(null);
+
+  // Selected Project Status Helpers (Ongoing / Completed / Upcoming)
+  const selectedProjectObj = useMemo(() => {
+    if (!selectedProject || selectedProject === 'ALL') return null;
+    return projects.find(p => String(p.id) === String(selectedProject)) || null;
+  }, [projects, selectedProject]);
+
+  const projectStatus = useMemo(() => {
+    if (!selectedProjectObj) return 'ALL';
+    return (selectedProjectObj.status || 'ONGOING').toUpperCase();
+  }, [selectedProjectObj]);
+
+  const isProjectOngoing = projectStatus === 'ONGOING' || projectStatus === 'ACTIVE';
+  const isProjectCompleted = projectStatus === 'COMPLETED';
+  const isProjectUpcoming = projectStatus === 'UPCOMING' || projectStatus === 'PLANNING' || projectStatus === 'STANDBY';
+  const canReleaseSalary = isProjectOngoing;
+
+  // Past Payrolls
+  const [pastPayrolls, setPastPayrolls] = useState([]);
+
+  const fetchPastPayrolls = () => {
+    api.get('/payroll').then(data => {
+      if (Array.isArray(data)) setPastPayrolls(data);
+    }).catch(console.error);
+  };
+
+  // Load Projects and initial Payroll
+  useEffect(() => {
+    api.get('/projects').then(data => {
+      if (Array.isArray(data)) setProjects(data);
+    }).catch(console.error);
+
+    fetchPastPayrolls();
+  }, []);
+
+  // Preset Handler
+  const handlePresetChange = (preset) => {
+    setCutoffPreset(preset);
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = now.getMonth();
+
+    if (preset === '1stHalf') {
+      setStartDate(`${y}-${String(m + 1).padStart(2, '0')}-01`);
+      setEndDate(`${y}-${String(m + 1).padStart(2, '0')}-15`);
+    } else if (preset === '2ndHalf') {
+      const lastDay = new Date(y, m + 1, 0).getDate();
+      setStartDate(`${y}-${String(m + 1).padStart(2, '0')}-16`);
+      setEndDate(`${y}-${String(m + 1).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`);
+    } else if (preset === 'ThisWeek') {
+      const d = new Date(now);
+      const day = d.getDay();
+      const diffToMon = d.getDate() - day + (day === 0 ? -6 : 1);
+      const mon = new Date(d.setDate(diffToMon));
+      const sun = new Date(mon);
+      sun.setDate(sun.getDate() + 6);
+      setStartDate(formatLocalDateInput(mon));
+      setEndDate(formatLocalDateInput(sun));
+    } else if (preset === 'LastWeek') {
+      const d = new Date(now);
+      const day = d.getDay();
+      const diffToMon = d.getDate() - day - 6 + (day === 0 ? -6 : 1);
+      const mon = new Date(d.setDate(diffToMon));
+      const sun = new Date(mon);
+      sun.setDate(sun.getDate() + 6);
+      setStartDate(formatLocalDateInput(mon));
+      setEndDate(formatLocalDateInput(sun));
+    } else if (preset === 'CurrentSemiMonthly') {
+      setStartDate(defaultStart);
+      setEndDate(defaultEnd);
+    }
+  };
+
+  // Generate Payroll from Attendance
+  const generatePayroll = async (start = startDate, end = endDate, pid = selectedProject) => {
+    setIsGenerating(true);
+    setLoading(true);
+    setCalcError(null);
+    try {
+      const res = await api.get(`/payroll/generate?startDate=${start}&endDate=${end}&project_id=${pid}`);
+      if (res && res.workers) {
+        setPayrollData(res);
+        setCalcError(null);
+      }
+    } catch (err) {
+      console.error('Failed to generate payroll:', err);
+      setCalcError(err.message || 'An error occurred while calculating the payroll.');
+    } finally {
+      setIsGenerating(false);
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const runPayroll = async () => {
+      await generatePayroll(startDate, endDate, selectedProject);
+    };
+
+    void runPayroll();
+  }, [startDate, endDate, selectedProject]);
+
+  // Filter workers in table
+  const filteredWorkers = useMemo(() => {
+    if (!payrollData.workers) return [];
+    if (!searchWorker.trim()) return payrollData.workers;
+    const q = searchWorker.toLowerCase().trim();
+    return payrollData.workers.filter(w =>
+      (w.worker_name || '').toLowerCase().includes(q) ||
+      (w.role || '').toLowerCase().includes(q)
+    );
+  }, [payrollData.workers, searchWorker]);
+  const payrollPagination = usePagination(filteredWorkers, `${searchWorker}|${startDate}|${endDate}|${selectedProject}`);
+  const payrollHistoryPagination = usePagination(pastPayrolls, activeTab);
+  const workerLogPagination = usePagination(selectedWorkerModal?.daily_logs || [], selectedWorkerModal?.worker_id || '');
+  const workerAdvancePagination = usePagination(selectedWorkerModal?.cash_advances || [], selectedWorkerModal?.worker_id || '');
+
+  // Save Payroll (Draft or Released)
+  const handleSavePayroll = async (status = 'Draft') => {
+    if (!canReleaseSalary) {
+      if (isProjectCompleted) {
+        alert('Cannot save or release salary for a Completed project. Please check Payroll History for past payroll records.');
+      } else if (isProjectUpcoming) {
+        alert('Cannot release payroll for an Upcoming project. Budget cannot be reduced until the project is set to Ongoing.');
+      } else {
+        alert('Salary can only be released for an Ongoing project. Please select an Ongoing project in the filter before releasing.');
+      }
+      return;
+    }
+
+    if (!payrollData.workers || payrollData.workers.length === 0) {
+      alert('No worker data available for this payroll.');
+      return;
+    }
+
+    const confirmMsg = status === 'Paid'
+      ? `Are you sure you want to RELEASE Payroll for ${startDate} to ${endDate}?\nTotal Net Payout: ₱${Number(payrollData.summary.totalNetPayout).toLocaleString()}`
+      : `Save this payroll as ${status}?`;
+
+    if (!confirm(confirmMsg)) return;
+
+    try {
+      const adminName = localStorage.getItem('adminName') || 'Admin';
+      const projName = selectedProject === 'ALL'
+        ? 'All Projects'
+        : (projects.find(p => String(p.id) === String(selectedProject))?.name || 'Project Site');
+
+      await api.post('/payroll', {
+        startDate,
+        endDate,
+        project_id: selectedProject,
+        project_name: projName,
+        summary: payrollData.summary,
+        workers: payrollData.workers,
+        status,
+        created_by: adminName
+      });
+
+      alert(`Payroll successfully ${status === 'Paid' ? 'released' : 'saved'}!`);
+      fetchPastPayrolls();
+      if (status === 'Paid') {
+        // Refresh calculation so already deducted cash advances reflect
+        generatePayroll();
+      }
+    } catch (err) {
+      console.error(err);
+      alert('An error occurred while saving the payroll.');
+    }
+  };
+
+  // Export to CSV
+  const handleExportCSV = () => {
+    if (!payrollData.workers?.length) return;
+
+    const headers = [
+      'Worker Name',
+      'Role',
+      'Daily Rate (PHP)',
+      'Worked Days',
+      'Present Days',
+      'Late Days',
+      'Halfday Days',
+      'Absent Days',
+      'Total Hours',
+      'Gross Pay (PHP)',
+      'Overtime Pay (PHP)',
+      'Late Penalties (PHP)',
+      'Cash Advance Deductions (PHP)',
+      'Net Pay (PHP)'
+    ];
+
+    const rows = payrollData.workers.map(w => [
+      `"${w.worker_name}"`,
+      `"${w.role}"`,
+      w.daily_rate,
+      w.worked_days,
+      w.present_days,
+      w.late_days,
+      w.halfday_days,
+      w.absent_days,
+      w.total_hours,
+      w.gross_pay,
+      w.overtime_pay,
+      w.late_deductions,
+      w.cash_advance_deductions,
+      w.net_pay
+    ]);
+
+    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', `Payroll_${startDate}_to_${endDate}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  return (
+    <AdminLayout>
+      {/* ── HEADER ── */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between pb-3 mb-3 border-b border-gray-200/60 gap-3 print:hidden">
+        <div>
+          <span className="text-[11px] font-bold text-[#A63228] tracking-widest uppercase">SALARY & PAYROLL SYSTEM</span>
+          <h1 className="text-xl font-extrabold text-gray-900 mt-0.5 tracking-tight flex items-center gap-2">
+            Workers Salary & Payroll
+            <span className="text-[10px] font-bold bg-[#A63228]/10 text-[#A63228] px-2 py-0.5 rounded-full">
+              Auto-Calculated
+            </span>
+          </h1>
+          <p className="text-[10px] text-gray-500 mt-0.5">
+            Salaries are automatically calculated based on attendance hours, daily rates, and deductions for late, half-day, absences, and cash advances.
+          </p>
+        </div>
+
+        {/* Top Action Tabs */}
+        <div className="flex items-center gap-2 print:hidden">
+          <div className="bg-gray-100 p-0.5 rounded-lg flex text-[10px] font-bold">
+            <button
+              onClick={() => updateTab('worksheet')}
+              className={`px-3 py-1.5 rounded-md transition-all ${
+                activeTab === 'worksheet'
+                  ? 'bg-white text-gray-900 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-900'
+              }`}
+            >
+              ⚡ Live Payroll Worksheet
+            </button>
+            <button
+              onClick={() => updateTab('history')}
+              className={`px-3 py-1.5 rounded-md transition-all ${
+                activeTab === 'history'
+                  ? 'bg-white text-gray-900 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-900'
+              }`}
+            >
+              📋 Payroll History ({pastPayrolls.length})
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {activeTab === 'worksheet' ? (
+        <>
+          {/* ── CUTOFF FILTER CONTROLS ── */}
+          <div className="bg-white rounded-xl border border-gray-100 p-3 shadow-xs mb-3 print:hidden">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+              {/* Presets & Dates */}
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">CUTOFF PRESET:</span>
+                <div className="flex flex-wrap gap-1">
+                  {[
+                    { id: 'CurrentSemiMonthly', label: 'Current Cutoff' },
+                    { id: '1stHalf', label: '1st - 15th' },
+                    { id: '2ndHalf', label: '16th - End' },
+                    { id: 'ThisWeek', label: 'This Week' },
+                    { id: 'LastWeek', label: 'Last Week' },
+                    { id: 'Custom', label: 'Custom' }
+                  ].map(p => (
+                    <button
+                      key={p.id}
+                      onClick={() => handlePresetChange(p.id)}
+                      className={`text-[9.5px] px-2.5 py-1 rounded-md font-bold transition-all ${
+                        cutoffPreset === p.id
+                          ? 'bg-[#A63228] text-white shadow-xs'
+                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex items-center gap-1.5 ml-0 lg:ml-2">
+                  <input
+                    type="date"
+                    value={startDate}
+                    onChange={(e) => { setStartDate(e.target.value); setCutoffPreset('Custom'); }}
+                    className="text-[10px] font-bold border border-gray-200 rounded-lg px-2 py-1 text-gray-700 bg-gray-50/50 focus:bg-white focus:outline-none focus:border-[#A63228]"
+                  />
+                  <span className="text-gray-400 text-[10px] font-bold">to</span>
+                  <input
+                    type="date"
+                    value={endDate}
+                    onChange={(e) => { setEndDate(e.target.value); setCutoffPreset('Custom'); }}
+                    className="text-[10px] font-bold border border-gray-200 rounded-lg px-2 py-1 text-gray-700 bg-gray-50/50 focus:bg-white focus:outline-none focus:border-[#A63228]"
+                  />
+                </div>
+              </div>
+
+              {/* Project Filter & Recalculate */}
+              <div className="flex items-center gap-2">
+                <select
+                  value={selectedProject}
+                  onChange={(e) => setSelectedProject(e.target.value)}
+                  className="text-[10px] font-bold border border-gray-200 rounded-lg px-2.5 py-1 text-gray-700 bg-gray-50/50 focus:outline-none focus:border-[#A63228]"
+                >
+                  <option value="ALL">All Project Sites</option>
+                  {projects.map(p => {
+                    const s = (p.status || 'ONGOING').toUpperCase();
+                    const tag = s === 'ONGOING' || s === 'ACTIVE'
+                      ? ' (Ongoing)'
+                      : s === 'COMPLETED'
+                        ? ' (Completed - History Only)'
+                        : ' (Upcoming - No Payroll)';
+                    return (
+                      <option key={p.id} value={String(p.id)}>
+                        {p.name}{tag}
+                      </option>
+                    );
+                  })}
+                </select>
+
+                <button
+                  onClick={() => generatePayroll()}
+                  disabled={isGenerating}
+                  className="flex items-center gap-1.5 px-3 py-1 bg-gray-900 hover:bg-black text-white text-[10px] font-bold rounded-lg shadow-xs transition-all disabled:opacity-50"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={isGenerating ? 'animate-spin' : ''}>
+                    <polyline points="23 4 23 10 17 10"></polyline>
+                    <polyline points="1 20 1 14 7 14"></polyline>
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                  </svg>
+                  {isGenerating ? 'Computing...' : 'Recalculate'}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Error Banner */}
+          {calcError && (
+            <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded-xl flex items-center justify-between text-xs text-red-700 print:hidden">
+              <div className="flex items-center gap-2">
+                <svg className="w-4 h-4 text-red-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span>
+                  <strong>Cannot calculate payroll:</strong> {calcError}
+                </span>
+              </div>
+              <button
+                onClick={() => generatePayroll()}
+                className="px-2.5 py-1 bg-red-600 text-white rounded-lg text-[10px] font-bold hover:bg-red-700 transition"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {/* COMPLETED PROJECT NOTICE BANNER */}
+          {isProjectCompleted && (
+            <div className="bg-blue-50/90 border border-blue-200 text-blue-900 p-3.5 rounded-xl text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3 shadow-xs print:hidden">
+              <div className="flex items-center gap-2.5">
+                <span className="text-xl">🏁</span>
+                <div>
+                  <div className="font-extrabold text-[11px] uppercase tracking-wide text-blue-950 flex items-center gap-1.5">
+                    {selectedProjectObj?.name} — THIS PROJECT IS COMPLETED
+                    <span className="bg-blue-200/70 text-blue-900 text-[11px] px-2 py-0.5 rounded-full font-bold">Payroll History Only</span>
+                  </div>
+                  <p className="text-[10px] text-blue-800 mt-0.5">
+                    This project has officially ended. Releasing or drafting new payroll is no longer allowed. You may only view past payroll records in <strong>Payroll History</strong>.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setSearchParams({ tab: 'history' })}
+                className="px-3 py-1.5 bg-blue-700 hover:bg-blue-800 text-white rounded-lg text-[10px] font-bold shadow-xs transition-all whitespace-nowrap self-start sm:self-auto cursor-pointer"
+              >
+                📋 View Payroll History →
+              </button>
+            </div>
+          )}
+
+          {/* UPCOMING PROJECT NOTICE BANNER */}
+          {isProjectUpcoming && (
+            <div className="bg-amber-50/90 border border-amber-200 text-amber-900 p-3.5 rounded-xl text-xs flex items-center gap-2.5 mb-3 shadow-xs print:hidden">
+              <span className="text-xl">⏳</span>
+              <div>
+                <div className="font-extrabold text-[11px] uppercase tracking-wide text-amber-950 flex items-center gap-1.5">
+                  {selectedProjectObj?.name} — THIS PROJECT IS UPCOMING
+                  <span className="bg-amber-200/70 text-amber-900 text-[11px] px-2 py-0.5 rounded-full font-bold">No Payroll Allowed</span>
+                </div>
+                <p className="text-[10px] text-amber-800 mt-0.5">
+                  This project has not yet started (Upcoming). Releasing salary, requesting cash advances, and reducing the budget are not allowed until the project is set to <strong>ONGOING</strong>.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* ── KPI METRIC CARDS ── */}
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-2.5 mb-3 print:hidden">
+            {/* Total Gross Pay */}
+            <div className="bg-white rounded-xl border border-gray-100 p-2.5 shadow-xs">
+              <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-0.5">GROSS EARNED WAGES</span>
+              <div className="text-base font-extrabold text-gray-900 tracking-tight">
+                ₱{Number(payrollData.summary.totalGrossPay || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+              <span className="text-[11px] text-gray-500 font-medium">Gross pay before deductions</span>
+            </div>
+
+            {/* Total Late Penalties */}
+            <div className="bg-white rounded-xl border border-gray-100 p-2.5 shadow-xs">
+              <span className="text-[11px] font-bold text-amber-600 uppercase tracking-wider block mb-0.5">LATE DEDUCTIONS</span>
+              <div className="text-base font-extrabold text-amber-700 tracking-tight">
+                -₱{Number(payrollData.summary.totalLateDeductions || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+              <span className="text-[11px] text-gray-500 font-medium">Late & Double Late deductions</span>
+            </div>
+
+            <div className="bg-white rounded-xl border border-gray-100 p-2.5 shadow-xs">
+              <span className="text-[11px] font-bold text-emerald-700 uppercase tracking-wider block mb-0.5">OVERTIME PAY</span>
+              <div className="text-base font-extrabold text-emerald-700 tracking-tight">
+                +₱{Number(payrollData.summary.totalOvertimePay || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+              <span className="text-[11px] text-gray-500 font-medium">Approved complete intervals only</span>
+            </div>
+
+            {/* Total Cash Advances */}
+            <div className="bg-white rounded-xl border border-gray-100 p-2.5 shadow-xs">
+              <span className="text-[11px] font-bold text-rose-600 uppercase tracking-wider block mb-0.5">CASH ADVANCES</span>
+              <div className="text-base font-extrabold text-rose-700 tracking-tight">
+                -₱{Number(payrollData.summary.totalCashAdvances || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+              <span className="text-[11px] text-gray-500 font-medium">Deducted cash advances</span>
+            </div>
+
+            {/* Total Net Payout */}
+            <div className="bg-white rounded-xl border-2 border-[#A63228]/20 p-2.5 shadow-xs bg-[#A63228]/2">
+              <span className="text-[11px] font-bold text-[#A63228] uppercase tracking-wider block mb-0.5">TOTAL NET PAYOUT</span>
+              <div className="text-lg font-black text-[#A63228] tracking-tight">
+                ₱{Number(payrollData.summary.totalNetPayout || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+              <span className="text-[11px] text-[#A63228]/80 font-bold">Total net payout to workers</span>
+            </div>
+
+            {/* Total Workforce & Hours */}
+            <div className="bg-white rounded-xl border border-gray-100 p-2.5 shadow-xs">
+              <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-0.5">MANPOWER & HOURS</span>
+              <div className="text-base font-extrabold text-gray-800 tracking-tight flex items-center gap-1.5">
+                <span>{payrollData.summary.totalWorkers || 0} Workers</span>
+                <span className="text-[11px] text-gray-400 font-bold">•</span>
+                <span className="text-blue-600">{payrollData.summary.totalHours || 0} hrs</span>
+              </div>
+              <span className="text-[11px] text-gray-500 font-medium">Total recorded hours</span>
+            </div>
+          </div>
+
+          {/* ── SEARCH & TABLE TOOLBAR ── */}
+          <div className="bg-white rounded-xl border border-gray-100 shadow-xs overflow-hidden mb-3">
+            {/* ── PRINT-ONLY OFFICIAL PAYROLL HEADER ── */}
+            <div className="hidden print:block p-4 border-b-2 border-gray-900 mb-2">
+              <div className="flex justify-between items-start">
+                <div className="flex items-center gap-3">
+                  <img src="/logo.png" alt="S-CON Logo" className="h-9 object-contain" />
+                  <div>
+                    <h1 className="text-sm font-extrabold text-gray-900 tracking-wider">S-CON BUILDTRACK</h1>
+                    <p className="text-[11px] text-gray-500 uppercase tracking-widest font-semibold">Official Workers Payroll Sheet</p>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className="inline-block px-2 py-0.5 rounded bg-gray-100 text-[11px] font-extrabold text-gray-800 uppercase tracking-wider">
+                    Payroll Sheet
+                  </span>
+                  <p className="text-[11px] text-gray-500 mt-1">Printed: {new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })}</p>
+                </div>
+              </div>
+              <div className="mt-3 pt-2.5 border-t border-gray-200 grid grid-cols-3 gap-2 text-[10px]">
+                <div>
+                  <span className="text-gray-400 font-bold uppercase text-[11px] block">CUTOFF PERIOD:</span>
+                  <strong className="text-gray-900 font-bold">{startDate} to {endDate}</strong>
+                </div>
+                <div>
+                  <span className="text-gray-400 font-bold uppercase text-[11px] block">PROJECT SITE:</span>
+                  <strong className="text-gray-900 font-bold">{selectedProject === 'ALL' ? 'All Projects' : (projects.find(p => String(p.id) === String(selectedProject))?.name || 'Selected Project')}</strong>
+                </div>
+                <div className="text-right">
+                  <span className="text-gray-400 font-bold uppercase text-[11px] block">TOTAL NET PAYOUT:</span>
+                  <strong className="text-[#A63228] font-black text-xs">₱{Number(payrollData.summary.totalNetPayout || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-3 border-b border-gray-100 flex flex-col md:flex-row md:items-center justify-between gap-2.5 print:hidden">
+              <div className="relative flex-1 max-w-sm">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400">
+                  <circle cx="11" cy="11" r="8"></circle>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+                <input
+                  type="text"
+                  placeholder="Search worker or role..."
+                  value={searchWorker}
+                  onChange={(e) => setSearchWorker(e.target.value)}
+                  className="w-full text-[10px] pl-7 pr-3 py-1.5 border border-gray-200 rounded-lg focus:outline-none focus:border-[#A63228] bg-gray-50/50 focus:bg-white"
+                />
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleExportCSV}
+                  className="flex items-center gap-1 px-2.5 py-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 rounded-lg text-[9.5px] font-bold transition-all"
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="7 10 12 15 17 10"></polyline>
+                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                  </svg>
+                  Export CSV
+                </button>
+
+                <button
+                  onClick={() => window.print()}
+                  className="flex items-center gap-1 px-2.5 py-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 rounded-lg text-[9.5px] font-bold transition-all"
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="6 9 6 2 18 2 18 9"></polyline>
+                    <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
+                    <rect x="6" y="14" width="12" height="8"></rect>
+                  </svg>
+                  Print Summary
+                </button>
+
+                {!canReleaseSalary && (
+                  <span className="text-[11px] text-gray-500 font-medium italic hidden lg:inline">
+                    {isProjectCompleted ? '(Completed: History Only)' :
+                     isProjectUpcoming ? '(Upcoming: Release Not Allowed)' :
+                     '(Select an Ongoing Project to release)'}
+                  </span>
+                )}
+
+                <button
+                  onClick={() => handleSavePayroll('Draft')}
+                  disabled={!canReleaseSalary}
+                  title={
+                    isProjectCompleted ? "Cannot save draft: This project is already Completed. Check Payroll History for past records." :
+                    isProjectUpcoming ? "Cannot save draft: This project is Upcoming." :
+                    selectedProject === 'ALL' ? "Please select an Ongoing project in the filter to save a draft." :
+                    "Save this payroll as draft"
+                  }
+                  className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[9.5px] font-bold transition-all ${
+                    canReleaseSalary
+                      ? 'bg-gray-100 hover:bg-gray-200 text-gray-800 cursor-pointer'
+                      : 'bg-gray-100 text-gray-400 cursor-not-allowed opacity-60'
+                  }`}
+                >
+                  💾 Save Draft
+                </button>
+
+                <button
+                  onClick={() => handleSavePayroll('Paid')}
+                  disabled={!canReleaseSalary}
+                  title={
+                    isProjectCompleted ? "Cannot release salary: This project is already Completed. Check Payroll History for past records." :
+                    isProjectUpcoming ? "Cannot release salary: This project is Upcoming. Budget cannot be reduced." :
+                    selectedProject === 'ALL' ? "Please select an Ongoing project in the filter to release salary." :
+                    "Approve and release payroll"
+                  }
+                  className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-[9.5px] font-bold shadow-xs transition-all ${
+                    canReleaseSalary
+                      ? 'bg-[#A63228] hover:bg-[#8e2920] text-white cursor-pointer'
+                      : 'bg-gray-200 text-gray-400 cursor-not-allowed opacity-60'
+                  }`}
+                >
+                  ✅ Approve & Release Payroll
+                </button>
+              </div>
+            </div>
+
+            {/* ── WORKERS PAYROLL TABLE ── */}
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-gray-50/80 border-b border-gray-100 text-[11px] font-extrabold text-gray-500 uppercase tracking-wider">
+                    <th className="py-2.5 px-3">WORKER NAME & ROLE</th>
+                    <th className="py-2.5 px-2 text-right">DAILY RATE</th>
+                    <th className="py-2.5 px-2 text-center">WORKED DAYS</th>
+                    <th className="py-2.5 px-2 text-center">ATTENDANCE SUMMARY</th>
+                    <th className="py-2.5 px-2 text-center">TOTAL HOURS</th>
+                    <th className="py-2.5 px-2 text-right">GROSS EARNED</th>
+                    <th className="py-2.5 px-2 text-right">OVERTIME</th>
+                    <th className="py-2.5 px-2 text-right">DEDUCTIONS (LATE / CA)</th>
+                    <th className="py-2.5 px-3 text-right">NET TAKE-HOME</th>
+                    <th className="py-2.5 px-3 text-center min-w-[110px] hidden print:table-cell">SIGNATURE</th>
+                    <th className="py-2.5 px-3 text-center print:hidden">ACTION</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-50 text-[10px]">
+                  {loading ? (
+                    <tr>
+                      <td colSpan="11" className="py-10 text-center text-gray-400">
+                        <div className="flex flex-col items-center justify-center gap-2">
+                          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-spin text-[#A63228]">
+                            <line x1="12" y1="2" x2="12" y2="6"></line>
+                            <line x1="12" y1="18" x2="12" y2="22"></line>
+                            <line x1="4.93" y1="4.93" x2="7.76" y2="7.76"></line>
+                            <line x1="16.24" y1="16.24" x2="19.07" y2="19.07"></line>
+                            <line x1="2" y1="12" x2="6" y2="12"></line>
+                            <line x1="18" y1="12" x2="22" y2="12"></line>
+                            <line x1="4.93" y1="19.07" x2="7.76" y2="16.24"></line>
+                            <line x1="16.24" y1="7.76" x2="19.07" y2="4.93"></line>
+                          </svg>
+                          <span className="text-[10px] font-bold text-gray-500">Calculating payroll from attendance records...</span>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : filteredWorkers.length > 0 ? (
+                    payrollPagination.pageItems.map(w => (
+                      <tr key={w.worker_id} className="hover:bg-gray-50/50 transition-colors">
+                        {/* Worker Name & Role */}
+                        <td className="py-2.5 px-3">
+                          <div className="flex items-center gap-2">
+                            <div className="w-6 h-6 rounded-full bg-[#A63228]/10 text-[#A63228] font-black text-[11px] flex items-center justify-center shrink-0">
+                              {w.worker_name.slice(0, 2).toUpperCase()}
+                            </div>
+                            <div>
+                              <div className="font-extrabold text-gray-900 leading-tight">{w.worker_name}</div>
+                              <div className="text-[11px] font-bold text-gray-400 uppercase tracking-wide">{w.role}</div>
+                            </div>
+                          </div>
+                        </td>
+
+                        {/* Daily Rate */}
+                        <td className="py-2.5 px-2 text-right font-extrabold text-gray-700">
+                          ₱{Number(w.daily_rate).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          <span className="block text-[10px] font-medium text-gray-400">₱{w.hourly_rate}/hr</span>
+                        </td>
+
+                        {/* Worked Days */}
+                        <td className="py-2.5 px-2 text-center font-black text-gray-900">
+                          {w.worked_days} days
+                        </td>
+
+                        {/* Attendance Breakdown Pills */}
+                        <td className="py-2.5 px-2 text-center">
+                          <div className="inline-flex items-center gap-1">
+                            <span className="px-1.5 py-0.5 rounded text-[11px] font-extrabold bg-[#e6f4ea] text-[#2e7d32]" title="Full Day Present (8 hrs)">
+                              {w.present_days}P
+                            </span>
+                            {w.late_days > 0 && (
+                              <span className="px-1.5 py-0.5 rounded text-[11px] font-extrabold bg-[#fff8e1] text-[#f57f17]" title={`Late days (-₱100 / -₱200)`}>
+                                {w.late_days}L
+                              </span>
+                            )}
+                            {w.halfday_days > 0 && (
+                              <span className="px-1.5 py-0.5 rounded text-[11px] font-extrabold bg-[#ede7f6] text-[#5e35b1]" title="Halfday (4 hrs, 50% rate)">
+                                {w.halfday_days}HD
+                              </span>
+                            )}
+                            {w.absent_days > 0 && (
+                              <span className="px-1.5 py-0.5 rounded text-[11px] font-extrabold bg-[#fdecea] text-[#A63228]" title="Absent days (0 wage)">
+                                {w.absent_days}A
+                              </span>
+                            )}
+                            {w.rest_days > 0 && (
+                              <span className="px-1.5 py-0.5 rounded text-[11px] font-extrabold bg-blue-50 text-blue-700" title="Rest Days / Non-working days">
+                                {w.rest_days}OFF
+                              </span>
+                            )}
+                          </div>
+                        </td>
+
+                        {/* Total Hours */}
+                        <td className="py-2.5 px-2 text-center font-bold text-blue-700">
+                          {w.total_hours} hrs
+                        </td>
+
+                        {/* Gross Earned */}
+                        <td className="py-2.5 px-2 text-right font-extrabold text-gray-900">
+                          ₱{Number(w.gross_pay).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </td>
+
+                        <td className="py-2.5 px-2 text-right font-bold text-emerald-700">
+                          {Number(w.overtime_pay || 0) > 0
+                            ? `+₱${Number(w.overtime_pay).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                            : '—'}
+                        </td>
+
+                        {/* Deductions (Late + Cash Advance) */}
+                        <td className="py-2.5 px-2 text-right">
+                          {w.late_deductions > 0 || w.cash_advance_deductions > 0 ? (
+                            <div>
+                              <span className="font-extrabold text-rose-700">
+                                -₱{Number(w.late_deductions + w.cash_advance_deductions).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </span>
+                              <div className="text-[10px] text-gray-400">
+                                {w.late_deductions > 0 && `Late: ₱${w.late_deductions} `}
+                                {w.cash_advance_deductions > 0 && `CA: ₱${w.cash_advance_deductions}`}
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="text-gray-400 font-bold">₱0.00</span>
+                          )}
+                        </td>
+
+                        {/* Net Take-Home */}
+                        <td className="py-2.5 px-3 text-right">
+                          <span className="text-xs font-black text-[#A63228]">
+                            ₱{Number(w.net_pay).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
+                        </td>
+
+                        {/* Worker Signature */}
+                        <td className="py-2.5 px-3 text-center hidden print:table-cell">
+                          <div className="w-24 border-b border-gray-300 mx-auto my-1.5 print:border-gray-800 print:mt-4"></div>
+                        </td>
+
+                        {/* Actions */}
+                        <td className="py-2.5 px-3 text-center print:hidden">
+                          <button
+                            onClick={() => setSelectedWorkerModal(w)}
+                            className="px-2 py-1 bg-gray-100 hover:bg-[#A63228] hover:text-white text-gray-700 text-[11px] font-bold rounded transition-all"
+                          >
+                            🔍 Inspect Slip
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan="9" className="py-8 text-center text-xs text-gray-400 italic">
+                        No worker records found for cutoff {startDate} to {endDate}.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+              <Pagination {...payrollPagination} />
+            </div>
+
+            {/* ── PRINT-ONLY SIGNATURE SECTION ── */}
+            <div className="hidden print:block p-4 border-t border-gray-200">
+              <div className="flex justify-end text-[10px]">
+                <div className="text-right flex flex-col items-end">
+                  <p className="text-gray-600 mb-8 text-[10px] font-semibold">Approved by:</p>
+                  <div className="w-52 border-b border-gray-800"></div>
+                  <p className="font-extrabold text-gray-900 text-[11px] mt-1.5 tracking-wide">Engineer Aldrich Sotalbo</p>
+                  <p className="text-gray-500 text-[11px] uppercase tracking-wider font-semibold">Project Engineer / Management</p>
+                  <p className="text-gray-400 text-[11px]">Sotalbo Construction</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      ) : (
+        // ── PAYROLL HISTORY TAB ──
+        <div className="bg-white rounded-xl border border-gray-100 shadow-xs overflow-hidden">
+          <div className="p-3 border-b border-gray-100 flex items-center justify-between">
+            <h2 className="text-xs font-extrabold text-gray-900 uppercase tracking-wider">
+              Past Payroll Runs ({pastPayrolls.length})
+            </h2>
+            <button
+              onClick={fetchPastPayrolls}
+              className="text-[9.5px] font-bold text-gray-500 hover:text-gray-900"
+            >
+              🔄 Refresh List
+            </button>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="bg-gray-50/80 border-b border-gray-100 text-[11px] font-extrabold text-gray-500 uppercase tracking-wider">
+                  <th className="py-2.5 px-3">CUTOFF PERIOD</th>
+                  <th className="py-2.5 px-2">PROJECT SITE</th>
+                  <th className="py-2.5 px-2 text-center">WORKERS</th>
+                  <th className="py-2.5 px-2 text-right">GROSS PAY</th>
+                  <th className="py-2.5 px-2 text-right">CASH ADVANCES</th>
+                  <th className="py-2.5 px-2 text-right">NET PAYOUT</th>
+                  <th className="py-2.5 px-2 text-center">STATUS</th>
+                  <th className="py-2.5 px-3 text-center">ACTION</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50 text-[10px]">
+                {pastPayrolls.length > 0 ? (
+                  payrollHistoryPagination.pageItems.map(p => (
+                    <tr key={p.id} className="hover:bg-gray-50/50 transition-colors">
+                      <td className="py-2.5 px-3 font-extrabold text-gray-900">
+                        {p.cutoff_start} → {p.cutoff_end}
+                      </td>
+                      <td className="py-2.5 px-2 font-bold text-gray-700">
+                        {p.project_name || 'All Projects'}
+                      </td>
+                      <td className="py-2.5 px-2 text-center font-bold text-gray-800">
+                        {p.workers?.length || p.summary?.totalWorkers || 0}
+                      </td>
+                      <td className="py-2.5 px-2 text-right font-extrabold text-gray-900">
+                        ₱{Number(p.summary?.totalGrossPay || 0).toLocaleString()}
+                      </td>
+                      <td className="py-2.5 px-2 text-right font-extrabold text-rose-700">
+                        -₱{Number(p.summary?.totalCashAdvances || 0).toLocaleString()}
+                      </td>
+                      <td className="py-2.5 px-2 text-right font-black text-[#A63228]">
+                        ₱{Number(p.summary?.totalNetPayout || 0).toLocaleString()}
+                      </td>
+                      <td className="py-2.5 px-2 text-center">
+                        <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-extrabold uppercase tracking-wider ${
+                          p.status === 'Paid' ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' :
+                          p.status === 'Approved' ? 'bg-blue-50 text-blue-800 border border-blue-200' :
+                          'bg-amber-50 text-amber-800 border border-amber-200'
+                        }`}>
+                          {p.status || 'Draft'}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 text-center">
+                        <button
+                          onClick={() => {
+                            setPayrollData({
+                              summary: p.summary || {},
+                              workers: p.workers || []
+                            });
+                            setStartDate(p.cutoff_start);
+                            setEndDate(p.cutoff_end);
+                            setSelectedProject(p.project_id || 'ALL');
+                            updateTab('worksheet');
+                          }}
+                          className="px-2.5 py-1 bg-gray-900 text-white hover:bg-black rounded text-[11px] font-bold transition-all"
+                        >
+                          View / Open
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan="8" className="py-8 text-center text-xs text-gray-400 italic">
+                      No recorded payroll history runs yet.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+            <Pagination {...payrollHistoryPagination} />
+          </div>
+        </div>
+      )}
+
+      {/* ── DETAILED WORKER PAYSLIP MODAL ── */}
+      {selectedWorkerModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-3">
+          <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] flex flex-col shadow-2xl border border-gray-100 overflow-hidden">
+            {/* Modal Header */}
+            <div className="p-3.5 bg-gray-900 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-full bg-[#A63228] text-white font-black text-xs flex items-center justify-center">
+                  {selectedWorkerModal.worker_name.slice(0, 2).toUpperCase()}
+                </div>
+                <div>
+                  <h3 className="text-xs font-extrabold text-white leading-tight">
+                    {selectedWorkerModal.worker_name}
+                  </h3>
+                  <p className="text-[11px] text-gray-300 font-bold uppercase tracking-wider">
+                    {selectedWorkerModal.role} • Daily Rate: ₱{Number(selectedWorkerModal.daily_rate).toLocaleString()} (₱{selectedWorkerModal.hourly_rate}/hr)
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setSelectedWorkerModal(null)}
+                className="text-gray-400 hover:text-white p-1 rounded-md"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-4 overflow-y-auto space-y-3.5 text-[10px]">
+              {/* Cutoff & Summary Banner */}
+              <div className="bg-gray-50 rounded-xl p-3 border border-gray-100 grid grid-cols-4 gap-2 text-center">
+                <div>
+                  <span className="text-[11px] font-bold text-gray-400 uppercase block">CUTOFF PERIOD</span>
+                  <strong className="text-gray-800 text-[9.5px]">{startDate} → {endDate}</strong>
+                </div>
+                <div>
+                  <span className="text-[11px] font-bold text-gray-400 uppercase block">WORKED DAYS</span>
+                  <strong className="text-gray-800 text-[9.5px]">{selectedWorkerModal.worked_days} Days ({selectedWorkerModal.total_hours} hrs)</strong>
+                </div>
+                <div>
+                  <span className="text-[11px] font-bold text-gray-400 uppercase block">GROSS WAGES</span>
+                  <strong className="text-gray-900 text-[9.5px]">₱{Number(selectedWorkerModal.gross_pay).toLocaleString()}</strong>
+                </div>
+                <div className="bg-[#A63228]/5 rounded-lg py-1 border border-[#A63228]/20">
+                  <span className="text-[11px] font-bold text-[#A63228] uppercase block">NET TAKE-HOME</span>
+                  <strong className="text-[#A63228] text-[11px] font-black">₱{Number(selectedWorkerModal.net_pay).toLocaleString()}</strong>
+                </div>
+              </div>
+
+              {/* Attendance Daily Logs Table */}
+              <div>
+                <h4 className="text-[9.5px] font-extrabold text-gray-800 uppercase tracking-wider mb-1.5 flex items-center justify-between">
+                  <span>Attendance & Daily Wage Logs</span>
+                  <span className="text-[11px] font-medium text-gray-400">Total: {selectedWorkerModal.daily_logs?.length || 0} days in cutoff</span>
+                </h4>
+                <div className="border border-gray-200 rounded-lg overflow-hidden">
+                  <table className="w-full text-left border-collapse">
+                    <thead className="bg-gray-100 text-[11px] font-extrabold text-gray-600 uppercase">
+                      <tr>
+                        <th className="py-1.5 px-2">DATE</th>
+                        <th className="py-1.5 px-2 text-center">MORNING SHIFT</th>
+                        <th className="py-1.5 px-2 text-center">AFTERNOON SHIFT</th>
+                        <th className="py-1.5 px-2 text-center">STATUS</th>
+                        <th className="py-1.5 px-2 text-center">HOURS</th>
+                        <th className="py-1.5 px-2 text-right">OT PAY</th>
+                        <th className="py-1.5 px-2 text-right">EARNED WAGE</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100 text-[11px]">
+                      {workerLogPagination.pageItems.map(log => (
+                        <tr key={log.date} className="hover:bg-gray-50/50">
+                          <td className="py-1.5 px-2 font-bold text-gray-900">{log.date}</td>
+                          <td className="py-1.5 px-2 text-center text-gray-600 font-mono">
+                            {log.morning_in !== '—' ? `${log.morning_in} → ${log.morning_out}` : '—'}
+                          </td>
+                          <td className="py-1.5 px-2 text-center text-gray-600 font-mono">
+                            {log.afternoon_in !== '—' ? `${log.afternoon_in} → ${log.afternoon_out}` : '—'}
+                          </td>
+                          <td className="py-1.5 px-2 text-center">
+                            <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-extrabold uppercase ${
+                              log.status === 'Present' ? 'bg-[#e6f4ea] text-[#2e7d32]' :
+                              log.status === 'Late' || log.status === 'Double Late' ? 'bg-[#fff8e1] text-[#f57f17]' :
+                              log.status.includes('Halfday') ? 'bg-[#ede7f6] text-[#5e35b1]' :
+                              log.status.includes('Rest Day') ? 'bg-blue-50 text-blue-700 font-bold' :
+                              'bg-[#fdecea] text-[#A63228]'
+                            }`}>
+                              {log.status}
+                            </span>
+                          </td>
+                          <td className="py-1.5 px-2 text-center font-bold text-gray-700">{log.hours}h</td>
+                          <td className="py-1.5 px-2 text-right font-bold text-emerald-700">
+                            {Number(log.overtime_pay || 0) > 0
+                              ? `₱${Number(log.overtime_pay).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                              : '—'}
+                          </td>
+                          <td className="py-1.5 px-2 text-right font-extrabold text-gray-900">
+                            ₱{Number(log.earned).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            {log.deduction > 0 && (
+                              <span className="block text-[10px] text-amber-600 font-bold">(-₱{log.deduction} late)</span>
+                            )}
+                            {log.overtime_pay > 0 && (
+                              <span className="block text-[10px] text-emerald-700 font-bold">(+₱{log.overtime_pay} overtime)</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <Pagination {...workerLogPagination} />
+                </div>
+              </div>
+
+              {/* Deductions: Cash Advances */}
+              {selectedWorkerModal.cash_advances?.length > 0 && (
+                <div>
+                  <h4 className="text-[9.5px] font-extrabold text-rose-800 uppercase tracking-wider mb-1.5">
+                    Deductions: Approved Cash Advances
+                  </h4>
+                  <div className="border border-rose-100 bg-rose-50/30 rounded-lg p-2 space-y-1">
+                    {workerAdvancePagination.pageItems.map(ca => (
+                      <div key={ca.id} className="flex justify-between items-center text-[11px]">
+                        <span className="font-bold text-gray-800">
+                          {ca.date} — {ca.reason}
+                        </span>
+                        <span className="font-extrabold text-rose-700">
+                          -₱{Number(ca.amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <Pagination {...workerAdvancePagination} />
+                </div>
+              )}
+
+              {/* Final Take-Home Box */}
+              <div className="p-3 bg-gray-50 border border-gray-200 rounded-xl space-y-1.5">
+                <div className="flex justify-between text-gray-600">
+                  <span>Regular Earned Wages:</span>
+                  <span className="font-bold">₱{Number(selectedWorkerModal.regular_earnings).toLocaleString()}</span>
+                </div>
+                {selectedWorkerModal.overtime_pay > 0 && (
+                  <div className="flex justify-between text-emerald-700">
+                    <span>Approved Overtime Pay:</span>
+                    <span className="font-bold">+₱{Number(selectedWorkerModal.overtime_pay).toLocaleString()}</span>
+                  </div>
+                )}
+                <div className="flex justify-between text-gray-600">
+                  <span>Gross Earnings before deductions:</span>
+                  <span className="font-bold">₱{Number(selectedWorkerModal.gross_pay).toLocaleString()}</span>
+                </div>
+                {selectedWorkerModal.late_deductions > 0 && (
+                  <div className="flex justify-between text-amber-700">
+                    <span>Late & Attendance Penalties:</span>
+                    <span className="font-bold">-₱{Number(selectedWorkerModal.late_deductions).toLocaleString()}</span>
+                  </div>
+                )}
+                {selectedWorkerModal.cash_advance_deductions > 0 && (
+                  <div className="flex justify-between text-rose-700">
+                    <span>Approved Cash Advance Deductions:</span>
+                    <span className="font-bold">-₱{Number(selectedWorkerModal.cash_advance_deductions).toLocaleString()}</span>
+                  </div>
+                )}
+                <div className="border-t border-gray-200 pt-1.5 flex justify-between items-center text-xs">
+                  <span className="font-black text-gray-900 uppercase">NET TAKE-HOME PAY:</span>
+                  <span className="font-black text-[#A63228] text-sm">
+                    ₱{Number(selectedWorkerModal.net_pay).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-3 border-t border-gray-100 bg-gray-50 flex items-center justify-between print:hidden">
+              <span className="text-[11px] text-gray-400 font-medium">BuildTrack Construction ERP • Verified Attendance Payroll</span>
+              <button
+                onClick={() => window.print()}
+                className="px-3 py-1.5 bg-gray-900 hover:bg-black text-white text-[9.5px] font-bold rounded-lg transition-all"
+              >
+                🖨️ Print Individual Payslip
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </AdminLayout>
+  );
+}
